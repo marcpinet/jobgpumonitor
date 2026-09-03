@@ -50,6 +50,15 @@ def test_rank_detection_prefers_torchrun_and_ignores_single_task_slurm():
     assert r == {"rank": 3, "world_size": 8, "local_rank": 3, "launcher": "slurm"}
     r = C.detect_rank({"RANK": "1", "WORLD_SIZE": "4", "LOCAL_RANK": "1", "SLURM_PROCID": "0", "SLURM_NTASKS": "4"})
     assert r["launcher"] == "torchrun" and r["rank"] == 1
+    assert C.detect_rank({"RANK": "0", "WORLD_SIZE": "1", "LOCAL_RANK": "0"}) is None  # some images export this
+
+
+def test_parse_mem_bytes():
+    assert C.parse_mem_bytes("8192") == 8192 * 1024**2
+    assert C.parse_mem_bytes("8G") == 8 * 1024**3
+    assert C.parse_mem_bytes("512M") == 512 * 1024**2
+    assert C.parse_mem_bytes("2gb") == 2 * 1024**3
+    assert C.parse_mem_bytes("") is None and C.parse_mem_bytes("x") is None
 
 
 def test_env_filter_masks_secrets_and_allowlists():

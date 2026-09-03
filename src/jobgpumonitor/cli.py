@@ -162,13 +162,14 @@ def cmd_emit(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
+    from .context import parse_mem_bytes
     from .probes import CgroupProbe, GpuProbe
 
     cfg = Config.from_env()
     ctx = build_context(cfg, source="process")
     base, origin = resolve_base_dir(cfg.dir)
     gpu = GpuProbe()
-    cg = CgroupProbe()
+    cg = CgroupProbe(fallback_limit=parse_mem_bytes(ctx["job"].get("mem")))
     try:
         import psutil  # type: ignore # noqa: F401
 
@@ -223,20 +224,27 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for d in report["gpus"]:
         print(f"      [{d['index']}] {d['name']}  {d['mem_total'] // (1024 * 1024) if d.get('mem_total') else '?'} MiB  {d['uuid']}")
     lim = report["cgroup"]
+    fb = lim.get("fallback_limit")
+    fb_txt = f"; scheduler request {fb // (1024 * 1024)} MiB used as limit" if fb else ""
     if lim.get("available"):
         ml = lim.get("mem_limit")
-        print(f"  cgroup v{lim['version']}  : mem limit {ml // (1024 * 1024) if ml else 'unlimited'} MiB")
+        vis = f"{ml // (1024 * 1024)} MiB" if ml else "unlimited in the visible cgroup"
+        print(f"  cgroup v{lim['version']}     : {vis}{fb_txt}")
     else:
-        print("  cgroup        : not available")
+        print(f"  cgroup        : not available{fb_txt}")
     print(f"  psutil        : {has_psutil}   nvidia-ml-py: {has_nvml}   tqdm: {has_tqdm}")
     if report["deadline"]:
         rem = report["deadline"]["end_ts"] - time.time()
         print(f"  deadline      : in {rem / 3600:.1f} h ({report['deadline']['source']})")
     else:
         print("  deadline      : unknown (no SLURM_JOB_END_TIME / OAR walltime in env)")
-    if report["git"]:
-        g = report["git"]
+    g = report["git"]
+    if g and g.get("commit"):
         print(f"  git           : {g.get('commit')} {g.get('branch')}{' (dirty)' if g.get('dirty') else ''}")
+    elif g:
+        print(f"  git           : repo at {g.get('root')} but no usable git binary")
+    else:
+        print("  git           : not a git checkout")
     print(f"  stdout        : {report['stdio'].get('stdout')}")
     if not base:
         print("\n!! No writable event directory. Set JGM_DIR to a shared, writable path.", file=sys.stderr)

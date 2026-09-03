@@ -39,6 +39,7 @@ def test_cgroup_v2_parsing(tmp_path, monkeypatch):
     (cg / "cpu.max").write_text("300000 100000\n")
     probe = CgroupProbe.__new__(CgroupProbe)
     probe.pid = os.getpid()
+    probe.fallback_limit = None
     probe.version, probe.dir = 2, str(cg)
     lim = probe.limits()
     assert lim["mem_limit"] == 2147483648 and lim["cpu_limit"] == 3.0
@@ -53,9 +54,13 @@ def test_cgroup_v1_unlimited(tmp_path):
     (cg / "memory.limit_in_bytes").write_text("9223372036854771712\n")
     probe = CgroupProbe.__new__(CgroupProbe)
     probe.pid = os.getpid()
+    probe.fallback_limit = None
     probe.version, probe.dir = 1, str(cg)
     s = probe.sample()
     assert s["mem_limit"] is None and "mem_pct" not in s
+    probe.fallback_limit = 20
+    s = probe.sample()
+    assert s["mem_limit"] == 20 and s["mem_limit_source"] == "scheduler" and s["mem_pct"] == 50.0
 
 
 def test_gpu_probe_without_gpu_is_quiet(monkeypatch):

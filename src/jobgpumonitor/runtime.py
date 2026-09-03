@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 from . import events as ev
 from ._log import dbg, set_debug, warn
 from .config import Config
-from .context import build_context
+from .context import build_context, parse_mem_bytes
 from .probes import CgroupProbe, GpuProbe, ProcessProbe, disk_usage, load_average
 from .sinks import ListSink, Sink, build_sinks, resolve_base_dir, run_dir_for
 
@@ -205,7 +205,7 @@ class Run:
             dbg(f"gpu probe init failed: {e}")
         try:
             self.proc = ProcessProbe(pid)
-            self.cgroup = CgroupProbe(pid)
+            self.cgroup = CgroupProbe(pid, fallback_limit=parse_mem_bytes(self.ctx["job"].get("mem")))
         except Exception as e:
             dbg(f"system probes init failed: {e}")
 
@@ -350,6 +350,8 @@ class Run:
             return False
 
     def log(self, metrics: Optional[Dict[str, Any]] = None, step: Optional[int] = None, epoch: Optional[int] = None, **kw: Any) -> bool:
+        if not self.enabled or self._child or self.ended:
+            return False
         m: Dict[str, Any] = dict(metrics or {})
         m.update(kw)
         if not m:
@@ -363,6 +365,8 @@ class Run:
         return self.emit("metric.log", {"metrics": clean, "step": step, "epoch": epoch})
 
     def progress(self, payload: Dict[str, Any]) -> bool:
+        if not self.enabled or self._child or self.ended:
+            return False
         rem = self.deadline_remaining_s()
         if rem is not None and payload.get("eta_s") is not None:
             payload["deadline_remaining_s"] = round(rem, 1)
@@ -528,7 +532,11 @@ class Run:
             self._stop.wait(wait)
 
     def _after_fork_child(self) -> None:
+        # A thread may have held the lock at fork time: give the child fresh, unlocked
+        # primitives so any accidental call returns immediately instead of deadlocking.
         self._child = True
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
 
     def _atexit(self) -> None:
         try:

@@ -176,6 +176,20 @@ def detect_scheduler(env: Mapping[str, str]) -> Dict[str, Any]:
     return job
 
 
+def parse_mem_bytes(value: Optional[str]) -> Optional[int]:
+    """Slurm/PBS memory strings: ``8192`` (MB for Slurm), ``8G``, ``512M``, ``1T``, ``8gb``."""
+    if not value:
+        return None
+    v = str(value).strip().lower().rstrip("b")
+    mult = {"k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
+    try:
+        if v and v[-1] in mult:
+            return int(float(v[:-1]) * mult[v[-1]])
+        return int(float(v)) * 1024**2  # Slurm reports plain numbers in MB
+    except ValueError:
+        return None
+
+
 def job_key(job: Mapping[str, Any]) -> Optional[str]:
     """Stable per-task identifier: ``<array_job>_<task>`` for array tasks, else the job id."""
     if job.get("array_job_id") and job.get("array_task_id") is not None:
@@ -200,8 +214,11 @@ def detect_rank(env: Mapping[str, str]) -> Optional[Dict[str, Any]]:
         if r is None:
             continue
         w = _int(env.get(ws)) if ws else None
-        if launcher == "slurm" and (w is None or w <= 1):
-            # A plain `srun python x.py` sets SLURM_PROCID=0 / NTASKS=1: not distributed.
+        if w is not None and w <= 1:
+            # RANK=0/WORLD_SIZE=1 (some images export it) or a plain `srun python x.py`
+            # with SLURM_NTASKS=1: a single task is not a distributed run.
+            continue
+        if launcher == "slurm" and w is None:
             continue
         return {
             "rank": r,

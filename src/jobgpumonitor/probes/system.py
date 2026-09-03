@@ -110,10 +110,13 @@ class CgroupProbe:
     process may only see the cgroup root, which still reflects the job's limit.
     """
 
-    def __init__(self, pid: Optional[int] = None) -> None:
+    def __init__(self, pid: Optional[int] = None, fallback_limit: Optional[int] = None) -> None:
         self.pid = pid or os.getpid()
         self.version: Optional[int] = None
         self.dir: Optional[str] = None
+        #: Limit to assume when the visible cgroup is unlimited (e.g. the scheduler's --mem):
+        #: inside a container only the innermost cgroup is visible, the job limit sits above it.
+        self.fallback_limit = fallback_limit
         self._detect()
 
     def _detect(self) -> None:
@@ -172,6 +175,7 @@ class CgroupProbe:
         if not self.available:
             return {"available": False}
         out: Dict[str, Any] = {"available": True, "version": self.version, "path": self.dir}
+        out["fallback_limit"] = self.fallback_limit
         if self.version == 2:
             out["mem_limit"] = self._read_int("memory.max")
             out["swap_limit"] = self._read_int("memory.swap.max")
@@ -220,6 +224,10 @@ class CgroupProbe:
                                 out["events_oom_kill"] = int(ln.split()[1])
                             except (ValueError, IndexError):
                                 pass
+            out["mem_limit_source"] = "cgroup"
+            if not out.get("mem_limit") and self.fallback_limit:
+                out["mem_limit"] = self.fallback_limit
+                out["mem_limit_source"] = "scheduler"
             if out.get("mem_used") is not None and out.get("mem_limit"):
                 out["mem_pct"] = round(100.0 * out["mem_used"] / out["mem_limit"], 1)
             return out

@@ -3,6 +3,8 @@
 export PYTHONPATH=/jgm-src/src JGM_DIR=/jgm JGM_DEBUG=1 PYTHONUNBUFFERED=1
 cd /jgm-src || exit 1
 echo "=== inside container: $(hostname) $(date) python=$(command -v python) ==="
+echo "=== scheduler env ==="
+env | grep -E "^(SLURM_(JOB|ARRAY|RESTART|CLUSTER|NTASKS|PROCID|MEM|CPUS|GPUS|STEP)|RANK|WORLD_SIZE|LOCAL_RANK|CUDA_VISIBLE|NVIDIA_)" | sort
 echo "=== doctor ==="
 python -m jobgpumonitor.cli doctor
 echo "=== wrapped run, clean exit (40 s) ==="
