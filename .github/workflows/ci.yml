@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check src tests
+      - run: ruff format --check src tests || true  # formatting is advisory for now
+
+  test:
+    name: py${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.12", "3.13"]
+        exclude:
+          - os: macos-latest
+            python: "3.9"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+      - name: doctor smoke test
+        run: jgm doctor && jgm --version
+
+  minimal-install:
+    name: install without extras
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - run: pip install .
+      - name: zero-dependency check
+        run: |
+          pip list --format=freeze | grep -v -i -E '^(jobgpumonitor|pip|setuptools|wheel)=' && exit 1 || true
+          python -c "import jobgpumonitor; print(jobgpumonitor.__version__)"
+          JGM_DIR=/tmp/jgm python -c "import jobgpumonitor.auto; jobgpumonitor.auto.run.log(x=1)"
+          test -n "$(ls /tmp/jgm/runs/local/*/0/*.jsonl)"
+
+  schema:
+    name: protocol schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install jsonschema
+      - run: python -c "import json, jsonschema; jsonschema.Draft202012Validator.check_schema(json.load(open('schema/event.schema.json')))"

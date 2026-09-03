@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jobgpumonitor.dev/schema/v1/event.schema.json",
+  "title": "jobgpumonitor event (protocol v1)",
+  "description": "One JSON object per line (JSONL). Consumers MUST ignore unknown fields and unknown event types.",
+  "type": "object",
+  "required": ["v", "id", "seq", "ts", "mono", "run_id", "emitter", "pid", "source", "type", "data"],
+  "properties": {
+    "v": { "const": 1, "description": "Protocol major version." },
+    "id": { "type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$", "description": "ULID, unique and time-sortable." },
+    "seq": { "type": "integer", "minimum": 0, "description": "Per (emitter, pid) sequence number starting at 0; gaps mean lost events." },
+    "ts": { "type": "string", "format": "date-time", "description": "Wall-clock UTC time of emission." },
+    "mono": { "type": "number", "minimum": 0, "description": "Seconds since the emitter started (monotonic clock)." },
+    "run_id": { "type": "string", "pattern": "^[^/]+/[^/]+/[0-9]+$", "description": "<cluster>/<job key>/<restart count>. Job key is <array_job>_<task> for array tasks." },
+    "emitter": { "type": "string", "description": "Identifies the emitting process: <source>-r<rank>-<host>-<pid> (or shell-<host>)." },
+    "pid": { "type": "integer" },
+    "source": { "type": "string", "enum": ["process", "wrapper", "shell", "scheduler"] },
+    "rank": { "type": ["integer", "null"], "description": "Global distributed rank, null when not distributed." },
+    "type": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$" },
+    "data": { "type": "object" }
+  },
+  "allOf": [
+    { "if": { "properties": { "type": { "const": "run.start" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/run_start" } } } },
+    { "if": { "properties": { "type": { "const": "run.heartbeat" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/run_heartbeat" } } } },
+    { "if": { "properties": { "type": { "const": "run.exception" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/run_exception" } } } },
+    { "if": { "properties": { "type": { "const": "run.end" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/run_end" } } } },
+    { "if": { "properties": { "type": { "const": "resource.sample" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/resource_sample" } } } },
+    { "if": { "properties": { "type": { "const": "progress.update" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/progress_update" } } } },
+    { "if": { "properties": { "type": { "const": "metric.log" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/metric_log" } } } },
+    { "if": { "properties": { "type": { "const": "log.line" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/log_line" } } } },
+    { "if": { "properties": { "type": { "const": "signal.received" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/signal_received" } } } }
+  ],
+  "$defs": {
+    "nullable_int": { "type": ["integer", "null"] },
+    "nullable_num": { "type": ["number", "null"] },
+    "nullable_str": { "type": ["string", "null"] },
+    "scheduler": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "enum": ["slurm", "oar", "pbs", "lsf", "sge", "local"] },
+        "job_id": { "$ref": "#/$defs/nullable_str" },
+        "job_name": { "$ref": "#/$defs/nullable_str" },
+        "array_job_id": { "$ref": "#/$defs/nullable_str" },
+        "array_task_id": { "$ref": "#/$defs/nullable_str" },
+        "restart_count": { "type": "integer" },
+        "cluster": { "$ref": "#/$defs/nullable_str" },
+        "partition": { "$ref": "#/$defs/nullable_str" },
+        "nodes": { "$ref": "#/$defs/nullable_str" },
+        "node_count": { "$ref": "#/$defs/nullable_int" },
+        "ntasks": { "$ref": "#/$defs/nullable_int" },
+        "cpus_per_task": { "$ref": "#/$defs/nullable_int" },
+        "gpus": { "$ref": "#/$defs/nullable_str" },
+        "mem": { "$ref": "#/$defs/nullable_str" },
+        "start_ts": { "$ref": "#/$defs/nullable_num" },
+        "end_ts": { "$ref": "#/$defs/nullable_num" },
+        "time_limit_s": { "$ref": "#/$defs/nullable_int" },
+        "step_id": { "$ref": "#/$defs/nullable_str" },
+        "interactive_step": { "type": "boolean" }
+      }
+    },
+    "deadline": {
+      "type": ["object", "null"],
+      "required": ["end_ts", "source"],
+      "properties": {
+        "end_ts": { "type": "number", "description": "Unix epoch seconds when the allocation ends." },
+        "source": { "type": "string", "enum": ["scheduler_env", "walltime_from_now", "file"] },
+        "approx": { "type": "boolean" }
+      }
+    },
+    "gpu_device": {
+      "type": "object",
+      "properties": {
+        "index": { "type": "integer" },
+        "mig_index": { "type": "integer" },
+        "uuid": { "type": "string" },
+        "name": { "type": "string" },
+        "mem_total": { "$ref": "#/$defs/nullable_int" },
+        "mig": { "type": "boolean" }
+      }
+    },
+    "gpu_sample": {
+      "type": "object",
+      "required": ["index"],
+      "properties": {
+        "index": { "type": "integer" },
+        "uuid": { "type": "string" },
+        "util": { "$ref": "#/$defs/nullable_int", "description": "SM utilisation percent." },
+        "mem_util": { "$ref": "#/$defs/nullable_int" },
+        "mem_used": { "$ref": "#/$defs/nullable_int" },
+        "mem_total": { "$ref": "#/$defs/nullable_int" },
+        "temp_c": { "$ref": "#/$defs/nullable_int" },
+        "power_w": { "$ref": "#/$defs/nullable_num" },
+        "sm_clock_mhz": { "$ref": "#/$defs/nullable_int" }
+      }
+    },
+    "progress_bar": {
+      "type": "object",
+      "required": ["bar_id", "n"],
+      "properties": {
+        "bar_id": { "type": "integer" },
+        "desc": { "type": "string" },
+        "n": { "type": "number" },
+        "total": { "$ref": "#/$defs/nullable_num" },
+        "unit": { "$ref": "#/$defs/nullable_str" },
+        "rate": { "$ref": "#/$defs/nullable_num", "description": "Iterations per second." },
+        "elapsed_s": { "$ref": "#/$defs/nullable_num" },
+        "eta_s": { "$ref": "#/$defs/nullable_num" },
+        "done": { "type": "boolean" },
+        "deadline_remaining_s": { "type": "number" },
+        "eta_vs_deadline_s": { "type": "number", "description": "Negative means the bar will not finish before the job deadline." }
+      }
+    },
+    "run_start": {
+      "type": "object",
+      "required": ["scheduler", "host", "start_ts"],
+      "properties": {
+        "scheduler": { "$ref": "#/$defs/scheduler" },
+        "rank": { "type": ["object", "null"], "properties": { "rank": { "type": "integer" }, "world_size": { "$ref": "#/$defs/nullable_int" }, "local_rank": { "$ref": "#/$defs/nullable_int" }, "launcher": { "type": "string" } } },
+        "host": { "type": "string" },
+        "user": { "$ref": "#/$defs/nullable_str" },
+        "cwd": { "$ref": "#/$defs/nullable_str" },
+        "argv": { "type": ["array", "null"], "items": { "type": "string" } },
+        "main_file": { "$ref": "#/$defs/nullable_str" },
+        "executable": { "type": "string" },
+        "python": { "type": "string" },
+        "platform": { "type": "string" },
+        "container": { "$ref": "#/$defs/nullable_str" },
+        "mounts": { "type": ["array", "null"], "items": { "type": "object" } },
+        "git": { "type": ["object", "null"] },
+        "packages": { "type": "object", "additionalProperties": { "type": "string" } },
+        "env": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Allow-listed variables, secrets masked as ***." },
+        "stdio": { "type": "object", "description": "Resolved /proc/self/fd/{0,1,2} targets: the real stdout/stderr files." },
+        "interactive": { "type": "boolean" },
+        "wrapped": { "type": "boolean" },
+        "deadline": { "$ref": "#/$defs/deadline" },
+        "start_ts": { "type": "number" },
+        "resources": { "type": "object" },
+        "emitter_config": { "type": "object" },
+        "command": { "type": "array", "items": { "type": "string" } },
+        "child_pid": { "type": "integer" }
+      }
+    },
+    "run_heartbeat": {
+      "type": "object",
+      "required": ["uptime_s"],
+      "properties": {
+        "uptime_s": { "type": "number" },
+        "deadline_remaining_s": { "$ref": "#/$defs/nullable_num" },
+        "progress": { "type": "array", "items": { "$ref": "#/$defs/progress_bar" } },
+        "metrics": { "type": "object" },
+        "samples": { "type": "integer" },
+        "dropped": { "type": "integer" },
+        "threads": { "type": "integer" }
+      }
+    },
+    "run_exception": {
+      "type": "object",
+      "required": ["type", "message", "traceback", "fatal"],
+      "properties": {
+        "type": { "type": "string" },
+        "module": { "$ref": "#/$defs/nullable_str" },
+        "message": { "type": "string" },
+        "traceback": { "type": "string" },
+        "frames": { "type": "array", "items": { "type": "object" } },
+        "is_oom": { "type": "boolean" },
+        "fatal": { "type": "boolean" },
+        "thread": { "$ref": "#/$defs/nullable_str" },
+        "kind": { "type": "string", "enum": ["error", "interrupted", "thread"] }
+      }
+    },
+    "run_end": {
+      "type": "object",
+      "required": ["status", "duration_s"],
+      "properties": {
+        "status": { "type": "string", "enum": ["ok", "error", "interrupted", "killed", "interactive"] },
+        "exit_code": { "$ref": "#/$defs/nullable_int", "description": "Best effort from inside the process; authoritative from the wrapper or scheduler." },
+        "duration_s": { "type": "number" },
+        "end_ts": { "type": "number" },
+        "exception": { "type": ["object", "null"] },
+        "metrics": { "type": "object" },
+        "progress": { "type": "array" },
+        "summary": { "type": "object", "description": "Aggregates: gpu util mean / idle fraction / mem max, rss max, cgroup max, cpu mean." },
+        "dropped": { "type": "integer" },
+        "signal": { "$ref": "#/$defs/nullable_str" },
+        "stderr_tail": { "type": "string" },
+        "command": { "type": "array" }
+      }
+    },
+    "resource_sample": {
+      "type": "object",
+      "properties": {
+        "gpus": { "type": ["array", "null"], "items": { "$ref": "#/$defs/gpu_sample" } },
+        "proc": { "type": ["object", "null"], "properties": { "pid": { "type": "integer" }, "cpu_pct": { "type": "number" }, "rss": { "type": "integer" }, "rss_peak": { "type": "integer" }, "threads": { "type": "integer" }, "children": { "type": "integer" }, "children_rss": { "type": "integer" }, "open_fds": { "type": "integer" } } },
+        "cgroup": { "type": ["object", "null"], "properties": { "mem_used": { "$ref": "#/$defs/nullable_int" }, "mem_limit": { "$ref": "#/$defs/nullable_int" }, "mem_peak": { "$ref": "#/$defs/nullable_int" }, "mem_pct": { "type": "number" }, "events_oom_kill": { "type": "integer" } } },
+        "disk": { "type": ["object", "null"] },
+        "load": { "type": ["array", "null"] }
+      }
+    },
+    "progress_update": { "$ref": "#/$defs/progress_bar" },
+    "metric_log": {
+      "type": "object",
+      "required": ["metrics"],
+      "properties": {
+        "metrics": { "type": "object" },
+        "step": { "$ref": "#/$defs/nullable_int" },
+        "epoch": { "$ref": "#/$defs/nullable_int" }
+      }
+    },
+    "log_line": {
+      "type": "object",
+      "required": ["logger", "level", "message"],
+      "properties": {
+        "logger": { "type": "string" },
+        "level": { "type": "string" },
+        "levelno": { "type": "integer" },
+        "message": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "type": "integer" },
+        "func": { "type": "string" },
+        "exception": { "type": "string" }
+      }
+    },
+    "signal_received": {
+      "type": "object",
+      "required": ["signal", "signum"],
+      "properties": {
+        "signal": { "type": "string" },
+        "signum": { "type": "integer" },
+        "previous_handler": { "type": "string" },
+        "will_terminate": { "type": "boolean" },
+        "forwarded": { "type": "boolean" },
+        "deadline_remaining_s": { "$ref": "#/$defs/nullable_num" }
+      }
+    }
+  }
+}

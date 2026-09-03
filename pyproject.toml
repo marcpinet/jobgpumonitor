@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jobgpumonitor"
+version = "0.1.0"
+description = "Zero-dependency emitter that watches a running (Slurm/OAR/local) GPU job and streams structured events."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [{ name = "Marc Pinet" }]
+keywords = ["slurm", "oar", "hpc", "gpu", "monitoring", "deep-learning"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: System :: Monitoring",
+]
+dependencies = []
+
+[project.optional-dependencies]
+gpu = ["nvidia-ml-py>=12", "psutil>=5.9"]
+dev = ["pytest>=8", "tqdm>=4.66", "psutil>=5.9", "ruff>=0.6", "jsonschema>=4"]
+
+[project.scripts]
+jgm = "jobgpumonitor.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/marcpinet/jobgpumonitor"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jobgpumonitor"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "schema", "docs", "tests", "README.md", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501", "UP006", "UP035", "UP007", "UP045", "B008"]
