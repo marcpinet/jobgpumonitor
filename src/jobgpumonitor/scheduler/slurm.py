@@ -70,7 +70,8 @@ def _split_scontrol(line: str) -> Dict[str, str]:
     for tok in re.split(r"\s+(?=[A-Za-z][\w/:.]*=)", line.strip()):
         if "=" in tok:
             k, v = tok.split("=", 1)
-            out[k] = v
+            if v not in ("(null)", "N/A", "None", ""):
+                out[k] = v
     return out
 
 
@@ -184,7 +185,7 @@ class SlurmAdapter(SchedulerAdapter):
         job.stderr = kv.get("StdErr") or job.stderr
         job.workdir = kv.get("WorkDir") or job.workdir
         job.command = kv.get("Command") or job.command
-        job.dependency = kv.get("Dependency") if kv.get("Dependency") not in (None, "(null)") else None
+        job.dependency = kv.get("Dependency")
         code, sig = parse_exit_code(kv.get("ExitCode"))
         if job.terminal:
             job.exit_code, job.exit_signal = code, sig

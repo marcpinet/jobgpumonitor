@@ -96,6 +96,7 @@ def test_scontrol_enrich_and_sacct_terminal():
     job = a.enrich(job)
     assert job.stdout == "/home/k/jgm-smoke_8224458.out" and job.restarts == 0 and job.requeue is True
     assert job.command.endswith("slurm_smoke.sbatch")
+    assert job.dependency is None and job.extra["batch_host"] == "r-marcel-c3-abs20-04"
     fin = a.finished(["8224458"], time.time() - 100, "kxxl2403")
     j = fin["8224458"]
     assert j.state == "OUT_OF_MEMORY" and j.terminal and j.exit_signal == 125 and j.elapsed_s == 115
