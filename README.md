@@ -61,7 +61,7 @@ Add your own with `jobgpumonitor.log(loss=0.12, step=10)` or `jgm emit stage nam
 
 ## Designed for real clusters
 
-- **No network needed.** Compute nodes rarely have internet; the shared filesystem always works. An HTTP sink is coming for when a server is reachable.
+- **No network needed from the job.** Compute nodes rarely have internet; the shared filesystem always works. `jgm forward` on the login node ships the files to a server over HTTPS, through the site proxy, and resumes where it left off.
 - **Never touches your program.** Hooks are chained, not replaced. Nothing raises. Forked workers and DDP ranks other than 0 stay quiet. Writes happen on a background thread, so a slow NFS never stalls a training step.
 - **Works inside containers.** Reads environment variables and `/proc` only, no `squeue` required. Point `JGM_DIR` at a mounted path and you are done.
 - **Honest about what it cannot see.** A SIGKILL leaves no trace from inside. Run `jgm scheduler` on the login node: it watches `squeue`/`sacct` and writes the scheduler's verdict (OOM, time-out, preemption, cancel), the queue state and the real `.out` path into the same run directories.
@@ -89,6 +89,7 @@ srun --container-mounts="$HOME/.jobgpumonitor:/jgm" jgm run -- python train.py
 ```
 jgm run [--name N] -- CMD...   run a command under monitoring, forward signals, keep the stderr tail
 jgm scheduler [--once]         login-node probe: squeue/sacct (or oarstat) -> scheduler.state events
+jgm forward --url U --token T  login-node relay: ship the event files to a jobgpumonitor-server (POST /ingest)
 jgm emit TYPE k=v ...          emit one event from a shell script
 jgm doctor [--json]            show what is detected on this node
 jgm ls [--dir D]               list runs found in the event directory

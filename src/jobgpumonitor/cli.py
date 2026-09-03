@@ -352,6 +352,35 @@ def cmd_scheduler(args: argparse.Namespace) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- jgm forward
+
+
+def cmd_forward(args: argparse.Namespace) -> int:
+    from ._log import set_debug
+    from .forward import Forwarder
+
+    cfg = Config.from_env()
+    set_debug(cfg.debug or args.verbose)
+    url = args.url or os.environ.get("JGM_FORWARD_URL")
+    token = args.token or os.environ.get("JGM_FORWARD_TOKEN")
+    if not url or not token:
+        print("jgm forward: need --url and --token (or JGM_FORWARD_URL / JGM_FORWARD_TOKEN)", file=sys.stderr)
+        return 2
+    base, origin = resolve_base_dir(cfg.dir)
+    if not base:
+        print("jgm forward: no event directory; set JGM_DIR", file=sys.stderr)
+        return 1
+    fw = Forwarder(base, url.rstrip("/"), token)
+    print(f"jgm forward: {base} [{origin}] -> {url}  every {args.interval:.0f}s"
+          + (f"  proxy={os.environ.get('https_proxy')}" if os.environ.get("https_proxy") else ""), file=sys.stderr)
+    if args.once:
+        r = fw.cycle()
+        print(f"shipped={r['shipped']} batches={r['batches']} ok={bool(r['ok'])}", file=sys.stderr)
+        return 0 if r["ok"] else 1
+    fw.run_forever(args.interval)
+    return 0
+
+
 # --------------------------------------------------------------------------- main
 
 
@@ -393,6 +422,14 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--scheduler", choices=["slurm", "oar"], help="force the adapter instead of auto-detecting")
     sc.add_argument("-v", "--verbose", action="store_true")
     sc.set_defaults(func=cmd_scheduler)
+
+    fw = sub.add_parser("forward", help="login-node relay: ship the JSONL event files to a jobgpumonitor-server")
+    fw.add_argument("--url", help="ingest endpoint, e.g. https://host/jgm/ingest (or JGM_FORWARD_URL)")
+    fw.add_argument("--token", help="ingest token (or JGM_FORWARD_TOKEN)")
+    fw.add_argument("--interval", type=float, default=10.0, help="seconds between scans (default 10)")
+    fw.add_argument("--once", action="store_true", help="ship what is new and exit")
+    fw.add_argument("-v", "--verbose", action="store_true")
+    fw.set_defaults(func=cmd_forward)
 
     v = sub.add_parser("version")
     v.set_defaults(func=lambda a: print(__version__) or 0)
