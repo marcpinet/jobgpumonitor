@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 from .config import Config
 from .runtime import Run, in_child_process
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = ["watch", "log", "emit", "finish", "current_run", "Run", "Config", "__version__"]
 
 _run: Optional[Run] = None
