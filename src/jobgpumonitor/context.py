@@ -214,6 +214,10 @@ def detect_rank(env: Mapping[str, str]) -> Optional[Dict[str, Any]]:
         if r is None:
             continue
         w = _int(env.get(ws)) if ws else None
+        if w is None and launcher in ("pmi", "pmix"):
+            # Slurm's PMIx plugin exports PMIX_RANK for every step, even single-task ones,
+            # without a size: fall back to the step's task count.
+            w = _int(env.get("PMIX_SIZE") or env.get("SLURM_STEP_NUM_TASKS") or env.get("SLURM_NTASKS"))
         if w is not None and w <= 1:
             # RANK=0/WORLD_SIZE=1 (some images export it) or a plain `srun python x.py`
             # with SLURM_NTASKS=1: a single task is not a distributed run.
@@ -236,6 +240,8 @@ def detect_container(env: Mapping[str, str]) -> Optional[str]:
         return "singularity"
     if any(k.startswith(("ENROOT_", "PYXIS_")) for k in env):
         return "enroot"
+    if os.path.exists("/usr/sbin/ldconfig.host") or os.path.exists("/etc/enroot"):
+        return "enroot"  # enroot bind-mounts the host ldconfig into every container
     if os.path.exists("/run/.containerenv"):
         return "podman"
     if os.path.exists("/.dockerenv"):

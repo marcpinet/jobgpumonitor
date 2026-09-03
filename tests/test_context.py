@@ -51,6 +51,9 @@ def test_rank_detection_prefers_torchrun_and_ignores_single_task_slurm():
     r = C.detect_rank({"RANK": "1", "WORLD_SIZE": "4", "LOCAL_RANK": "1", "SLURM_PROCID": "0", "SLURM_NTASKS": "4"})
     assert r["launcher"] == "torchrun" and r["rank"] == 1
     assert C.detect_rank({"RANK": "0", "WORLD_SIZE": "1", "LOCAL_RANK": "0"}) is None  # some images export this
+    assert C.detect_rank({"PMIX_RANK": "0", "SLURM_STEP_NUM_TASKS": "1"}) is None  # Slurm pmix on a single task
+    r = C.detect_rank({"PMIX_RANK": "2", "SLURM_STEP_NUM_TASKS": "4"})
+    assert r == {"rank": 2, "world_size": 4, "local_rank": None, "launcher": "pmix"}
 
 
 def test_parse_mem_bytes():

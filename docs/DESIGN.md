@@ -199,4 +199,12 @@ sink fichier, hooks exception / sys.exit / signaux / tqdm / logging / faulthandl
 sondes GPU (NVML ou nvidia-smi), processus, cgroup, disque, `jgm run|emit|doctor|ls`,
 schéma JSON du protocole. Décisions : sonde ordonnanceur dans ce projet en phase 2,
 transport HTTP en phase 2, OAR en détection d'environnement seulement (pas de cluster
-de test), Python ≥ 3.9. Pas encore validé sur un vrai nœud Slurm avec GPU.
+de test), Python ≥ 3.9.
+
+Validé sur marcel-c3 le 2026-09-03 (job 8224458, RTX 2080 Ti, conteneur enroot PyTorch 2.6) :
+run propre et run planté capturés de bout en bout, 340 événements, `seq` continus, `run.end`
+toujours en dernière ligne, GPU via nvidia-smi, deadline via `SLURM_JOB_END_TIME`, limite
+mémoire prise sur `SLURM_MEM_PER_NODE` car le cgroup visible dans le conteneur est illimité.
+Leçons : pyxis n'exécute pas une commande multi-lignes passée à `bash -c` (mettre les
+commandes dans un fichier) ; `SLURM_JOB_NAME` n'est pas propagé dans les steps `srun` (le nom
+viendra de la sonde ordonnanceur) ; dans un step, stdout est un tube, pas le fichier `.out`.
