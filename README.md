@@ -64,7 +64,7 @@ Add your own with `jobgpumonitor.log(loss=0.12, step=10)` or `jgm emit stage nam
 - **No network needed.** Compute nodes rarely have internet; the shared filesystem always works. An HTTP sink is coming for when a server is reachable.
 - **Never touches your program.** Hooks are chained, not replaced. Nothing raises. Forked workers and DDP ranks other than 0 stay quiet. Writes happen on a background thread, so a slow NFS never stalls a training step.
 - **Works inside containers.** Reads environment variables and `/proc` only, no `squeue` required. Point `JGM_DIR` at a mounted path and you are done.
-- **Honest about what it cannot see.** A SIGKILL leaves no trace from inside; the [protocol](docs/PROTOCOL.md) is built so a consumer combines these events with the scheduler's own state.
+- **Honest about what it cannot see.** A SIGKILL leaves no trace from inside. Run `jgm scheduler` on the login node: it watches `squeue`/`sacct` and writes the scheduler's verdict (OOM, time-out, preemption, cancel), the queue state and the real `.out` path into the same run directories.
 
 ## Slurm in one screen
 
@@ -81,6 +81,21 @@ Inside an enroot or Apptainer container, mount the event directory and export `J
 mkdir -p "$HOME/.jobgpumonitor" && export JGM_DIR=/jgm
 srun --container-mounts="$HOME/.jobgpumonitor:/jgm" jgm run -- python train.py
 ```
+
+## Command line
+
+`jgm` ships with the package (short for **j**ob**g**pu**m**onitor); `python -m jobgpumonitor.cli` is equivalent.
+
+```
+jgm run [--name N] -- CMD...   run a command under monitoring, forward signals, keep the stderr tail
+jgm scheduler [--once]         login-node probe: squeue/sacct (or oarstat) -> scheduler.state events
+jgm emit TYPE k=v ...          emit one event from a shell script
+jgm doctor [--json]            show what is detected on this node
+jgm ls [--dir D]               list runs found in the event directory
+```
+
+Keep the probe alive on the login node with `tmux` or `systemd --user`, or run
+`jgm scheduler --once` from cron.
 
 ## Configuration
 

@@ -319,6 +319,39 @@ def _listdir(path: str) -> List[str]:
         return []
 
 
+# --------------------------------------------------------------------------- jgm scheduler
+
+
+def cmd_scheduler(args: argparse.Namespace) -> int:
+    from ._log import set_debug
+    from .scheduler import SchedulerProbe, detect_adapter
+
+    cfg = Config.from_env()
+    set_debug(cfg.debug or args.verbose)
+    adapter = detect_adapter(args.scheduler)
+    if adapter is None:
+        print("jgm scheduler: no scheduler found (squeue / oarstat not on PATH); use --scheduler to force one", file=sys.stderr)
+        return 2
+    base, origin = resolve_base_dir(cfg.dir)
+    if not base:
+        print("jgm scheduler: no writable event directory; set JGM_DIR", file=sys.stderr)
+        return 1
+    user: Optional[str] = None if args.all_users else (args.user or os.environ.get("USER") or os.environ.get("LOGNAME"))
+    probe = SchedulerProbe(adapter, base, user=user, cluster=cfg.cluster, interval_s=args.interval, refresh_s=args.refresh)
+    print(f"jgm scheduler: {adapter.name} cluster={probe.cluster} user={user or 'all'} dir={base} [{origin}] "
+          f"interval={probe.interval_s:.0f}s", file=sys.stderr)
+    if args.once:
+        events = probe.poll()
+        probe.close()
+        for e in events:
+            d = e["data"]
+            print(f"{e['run_id']:<36} {d['state']:<14} {d['change']:<10} {d.get('job_name') or ''}")
+        print(f"{len(events)} event(s) emitted", file=sys.stderr)
+        return 0
+    probe.run_forever()
+    return 0
+
+
 # --------------------------------------------------------------------------- main
 
 
@@ -350,6 +383,16 @@ def build_parser() -> argparse.ArgumentParser:
     ls.add_argument("--json", action="store_true")
     ls.add_argument("-n", "--limit", type=int, default=30)
     ls.set_defaults(func=cmd_ls)
+
+    sc = sub.add_parser("scheduler", help="login-node probe: emit scheduler.state from squeue/sacct (or oarstat)")
+    sc.add_argument("--interval", type=float, default=30.0, help="seconds between polls (default 30)")
+    sc.add_argument("--refresh", type=float, default=600.0, help="re-emit unchanged running jobs every N seconds (default 600)")
+    sc.add_argument("--once", action="store_true", help="poll once and exit (cron friendly)")
+    sc.add_argument("--user", help="only this user's jobs (default: $USER)")
+    sc.add_argument("--all-users", action="store_true", help="watch every job on the cluster")
+    sc.add_argument("--scheduler", choices=["slurm", "oar"], help="force the adapter instead of auto-detecting")
+    sc.add_argument("-v", "--verbose", action="store_true")
+    sc.set_defaults(func=cmd_scheduler)
 
     v = sub.add_parser("version")
     v.set_defaults(func=lambda a: print(__version__) or 0)

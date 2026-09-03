@@ -194,6 +194,9 @@ tests/               unitaires (contexte, sinks, hooks), intégration (sous-proc
 
 ## 11. État au 2026-09-03
 
+Phase 2, sonde ordonnanceur : `jgm scheduler` implémentée (Slurm complet via squeue/scontrol/sacct, OAR best effort via oarstat -J), événements `scheduler.state` dans les dossiers de run, fichier d'état pour la reprise, heartbeat de la sonde. Tests avec sorties simulées ; à valider sur marcel-c3.
+
+
 Phase 1 implémentée et testée (46 tests, macOS, Python 3.12) : bibliothèque stdlib-only,
 sink fichier, hooks exception / sys.exit / signaux / tqdm / logging / faulthandler,
 sondes GPU (NVML ou nvidia-smi), processus, cgroup, disque, `jgm run|emit|doctor|ls`,

@@ -102,9 +102,25 @@ fraction, gpu mem max, rss max, cgroup mem max, cpu mean), `dropped`; from `jgm 
 ### `custom.*`
 `jobgpumonitor.emit("stage", name="eval")` or `jgm emit stage name=eval`.
 
-### Reserved for phase 2
-`checkpoint.saved`, `stack.dump`, `scheduler.state` (from the login-node probe: state,
-reason, node, time limit, exit code, MaxRSS as reported by `sacct` / `oarstat`).
+### `scheduler.state`
+Emitted by the login-node probe (`jgm scheduler`), `source: scheduler`, into the same run
+directory as the process events (`scheduler-<host>.jsonl`). One event per change:
+`change` is `first_seen`, `state`, `detail`, `refresh` (unchanged running job, every
+`--refresh` seconds) or `ended`. Fields: `state` (normalised across schedulers), `terminal`,
+`active`, `state_reason` with `extra.reason_hint` for pending jobs, `job_name`, `partition`,
+`qos`, `nodes`, `gres`, `mem`, `submit_ts`/`start_ts`/`end_ts`, `time_limit_s`, `restarts`,
+`exit_code`/`exit_signal`, `stdout`/`stderr`/`workdir`/`command` (captured from `scontrol`
+while the job is alive and kept after it is forgotten), and for terminal jobs `elapsed_s`
+and `max_rss` from `sacct`. A job that leaves the queue while accounting is unavailable ends
+as `UNKNOWN_ENDED`.
+
+This is the only source for `OUT_OF_MEMORY`, `TIMEOUT`, `CANCELLED`, `PREEMPTED`,
+`NODE_FAIL`: after a SIGKILL nothing runs inside the job. The probe also writes
+`$JGM_DIR/scheduler/probe-<cluster>-<host>.json` (overwritten each poll) so a consumer can
+tell whether the probe itself is alive.
+
+### Reserved for later
+`checkpoint.saved`, `stack.dump`.
 
 ## What a consumer should derive (not the emitter's job)
 
