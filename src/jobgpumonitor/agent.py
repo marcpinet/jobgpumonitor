@@ -46,11 +46,12 @@ def running_pid(base_dir: str) -> Optional[int]:
         return None
     except PermissionError:
         return pid
-    # same pid reused by another program after a reboot?
+    # same pid reused by another program after a reboot? (Linux: the kernel tells us)
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
-            if b"jobgpumonitor" not in f.read() and b"jgm" not in f.read():
-                return None
+            cmdline = f.read()
+        if b"jobgpumonitor" not in cmdline and b"jgm" not in cmdline:
+            return None
     except OSError:
         pass
     return pid

@@ -113,9 +113,19 @@ def test_agent_pid_and_keepalive(tmp_path, monkeypatch):
     with open(agent.pid_path(base), "w") as f:
         f.write("999999999")
     assert agent.running_pid(base) is None  # dead pid
+    # a live process whose command line looks like ours (on Linux the cmdline is checked)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "jobgpumonitor-agent-marker"])
+    try:
+        with open(agent.pid_path(base), "w") as f:
+            f.write(str(proc.pid))
+        assert agent.running_pid(base) == proc.pid
+    finally:
+        proc.kill()
+        proc.wait()
+    # a live process that is clearly not the agent (pytest itself)
     with open(agent.pid_path(base), "w") as f:
         f.write(str(os.getpid()))
-    assert agent.running_pid(base) == os.getpid()
+    assert agent.running_pid(base) in (None, os.getpid())  # None on Linux, unknowable elsewhere
     assert agent._self_argv() in (["-m", "jobgpumonitor"],) or agent._self_argv()[0].endswith(".pyz")
 
 
