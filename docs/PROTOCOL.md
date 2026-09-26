@@ -119,6 +119,13 @@ This is the only source for `OUT_OF_MEMORY`, `TIMEOUT`, `CANCELLED`, `PREEMPTED`
 `$JGM_DIR/scheduler/probe-<cluster>-<host>.json` (overwritten each poll) so a consumer can
 tell whether the probe itself is alive.
 
+### `log.chunk`
+Emitted by the login-node probe when it can see the job's `.out` / `.err` files (paths from
+`scontrol`): `stream` (`stdout` or `stderr`), `path`, `offset` (bytes), `text`, `size`,
+`truncated` (per-file cap reached, default 8 MB, nothing more is sent), `eof` (job ended
+and the file is fully sent). Chunks end on a line boundary while the job runs. A consumer
+appends the chunks of a stream in `offset` order to show the log live.
+
 ### Reserved for later
 `checkpoint.saved`, `stack.dump`.
 

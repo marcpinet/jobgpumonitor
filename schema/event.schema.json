@@ -29,7 +29,8 @@
     { "if": { "properties": { "type": { "const": "metric.log" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/metric_log" } } } },
     { "if": { "properties": { "type": { "const": "log.line" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/log_line" } } } },
     { "if": { "properties": { "type": { "const": "signal.received" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/signal_received" } } } },
-    { "if": { "properties": { "type": { "const": "scheduler.state" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/scheduler_state" } } } }
+    { "if": { "properties": { "type": { "const": "scheduler.state" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/scheduler_state" } } } },
+    { "if": { "properties": { "type": { "const": "log.chunk" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/log_chunk" } } } }
   ],
   "$defs": {
     "nullable_int": { "type": ["integer", "null"] },
@@ -268,6 +269,20 @@
         "elapsed_s": { "$ref": "#/$defs/nullable_int" },
         "extra": { "type": "object", "description": "reason_hint, batch_host, alloc_tres, cancelled_by, ..." },
         "probe": { "type": "object" }
+      }
+    },
+    "log_chunk": {
+      "type": "object",
+      "required": ["stream", "path", "offset", "text"],
+      "description": "A slice of the job's stdout/stderr file, read by the login-node probe. Concatenate chunks of one stream in offset order.",
+      "properties": {
+        "stream": { "type": "string", "enum": ["stdout", "stderr"] },
+        "path": { "type": "string" },
+        "offset": { "type": "integer", "minimum": 0, "description": "Byte offset of this chunk in the file." },
+        "text": { "type": "string" },
+        "size": { "type": "integer", "description": "File size when the chunk was read." },
+        "truncated": { "type": "boolean", "description": "True on the last chunk when the per-file cap was reached; nothing more is sent." },
+        "eof": { "type": "boolean", "description": "True when the job has ended and this chunk reaches the end of the file." }
       }
     },
     "signal_received": {

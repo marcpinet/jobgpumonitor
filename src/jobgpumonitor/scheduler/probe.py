@@ -21,6 +21,7 @@ from .. import events as ev
 from .._log import dbg, warn
 from ..sinks import FileSink, run_dir_for
 from .base import JobInfo, SchedulerAdapter, run_command
+from .logtail import LogTailer
 
 _SANITISE = str.maketrans({c: "_" for c in "/\\ \t\n"})
 
@@ -49,6 +50,8 @@ class SchedulerProbe:
         refresh_s: float = 600.0,
         host: Optional[str] = None,
         now=time.time,  # type: ignore[no-untyped-def]
+        tail_logs: bool = True,
+        log_max_bytes: int = 8 * 1024 * 1024,
     ) -> None:
         self.adapter = adapter
         self.base_dir = base_dir
@@ -69,7 +72,11 @@ class SchedulerProbe:
         self._stop = threading.Event()
         self.polls = 0
         self.emitted = 0
+        self.log_chunks = 0
         self._load_state()
+        self.tailer: Optional[LogTailer] = None
+        if tail_logs:
+            self.tailer = LogTailer(self.state.setdefault("logs", {}), max_bytes=log_max_bytes, now=self.now)
 
     # ------------------------------------------------------------------ state file
 
@@ -123,20 +130,22 @@ class SchedulerProbe:
             self._sinks[run_id] = s
         return s
 
-    def emit(self, job: JobInfo, change: str) -> Dict[str, Any]:
-        run_id = self.run_id_for(job)
+    def emit_raw(self, run_id: str, etype: str, data: Dict[str, Any]) -> Dict[str, Any]:
         seq = self._seq.get(run_id, 0)
         self._seq[run_id] = seq + 1
-        data = job.to_data()
-        data["change"] = change  # first_seen | state | detail | refresh | ended
-        data["probe"] = {"host": self.host, "poll_ts": self.now(), "scheduler": self.adapter.name}
         env = ev.make_envelope(
             run_id=run_id, emitter=self.emitter, pid=self.pid, source="scheduler", rank=None,
-            seq=seq, etype="scheduler.state", data=data, mono=time.monotonic() - self._t0, ts=self.now(),
+            seq=seq, etype=etype, data=data, mono=time.monotonic() - self._t0, ts=self.now(),
         )
         self._sink(run_id).write(ev.to_json(env))
         self.emitted += 1
         return env
+
+    def emit(self, job: JobInfo, change: str) -> Dict[str, Any]:
+        data = job.to_data()
+        data["change"] = change  # first_seen | state | detail | refresh | ended
+        data["probe"] = {"host": self.host, "poll_ts": self.now(), "scheduler": self.adapter.name}
+        return self.emit_raw(self.run_id_for(job), "scheduler.state", data)
 
     # ------------------------------------------------------------------ polling
 
@@ -181,6 +190,8 @@ class SchedulerProbe:
                 last_emit = now
             else:
                 last_emit = rec.get("last_emit_ts", now)
+            if self.tailer and job.active:
+                self.tailer.track(self.run_id_for(job), job.stdout, job.stderr, None)
             known[job.job_id] = {
                 "sig": sig, "state": job.state, "restarts": job.restarts, "job_key": job.job_key,
                 "stdout": job.stdout, "stderr": job.stderr, "workdir": job.workdir, "command": job.command,
@@ -212,8 +223,14 @@ class SchedulerProbe:
                         setattr(job, f, rec[f])
                 emitted.append(self.emit(job, "ended"))
                 rec.update(ended=True, state=job.state, last_emit_ts=now, ended_ts=now)
+                if self.tailer:
+                    self.tailer.track(self.run_id_for(job), job.stdout, job.stderr, now)
+        if self.tailer:
+            self.log_chunks += self.tailer.poll(self.emit_raw)
         # forget finished jobs after a day
         for jid in [j for j, r in known.items() if r.get("ended") and now - r.get("ended_ts", now) > 86400]:
+            if self.tailer:
+                self.tailer.forget(f"{self.cluster}/{str(known[jid].get('job_key', jid)).translate(_SANITISE)}/{known[jid].get('restarts', 0)}")
             del known[jid]
         self._save_state()
         self._write_heartbeat({"ok": True, "queued": len(jobs), "emitted_this_poll": len(emitted)})

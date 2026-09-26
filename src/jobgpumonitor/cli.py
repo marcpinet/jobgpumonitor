@@ -337,7 +337,8 @@ def cmd_scheduler(args: argparse.Namespace) -> int:
         print("jgm scheduler: no writable event directory; set JGM_DIR", file=sys.stderr)
         return 1
     user: Optional[str] = None if args.all_users else (args.user or os.environ.get("USER") or os.environ.get("LOGNAME"))
-    probe = SchedulerProbe(adapter, base, user=user, cluster=cfg.cluster, interval_s=args.interval, refresh_s=args.refresh)
+    probe = SchedulerProbe(adapter, base, user=user, cluster=cfg.cluster, interval_s=args.interval, refresh_s=args.refresh,
+                           tail_logs=not args.no_logs, log_max_bytes=int(args.log_max_mb * 1024 * 1024))
     print(f"jgm scheduler: {adapter.name} cluster={probe.cluster} user={user or 'all'} dir={base} [{origin}] "
           f"interval={probe.interval_s:.0f}s", file=sys.stderr)
     if args.once:
@@ -420,6 +421,8 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--user", help="only this user's jobs (default: $USER)")
     sc.add_argument("--all-users", action="store_true", help="watch every job on the cluster")
     sc.add_argument("--scheduler", choices=["slurm", "oar"], help="force the adapter instead of auto-detecting")
+    sc.add_argument("--no-logs", action="store_true", help="do not tail the jobs' stdout/stderr files")
+    sc.add_argument("--log-max-mb", type=float, default=8.0, help="stop tailing a file past this size (default 8 MB)")
     sc.add_argument("-v", "--verbose", action="store_true")
     sc.set_defaults(func=cmd_scheduler)
 

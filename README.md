@@ -88,7 +88,7 @@ srun --container-mounts="$HOME/.jobgpumonitor:/jgm" jgm run -- python train.py
 
 ```
 jgm run [--name N] -- CMD...   run a command under monitoring, forward signals, keep the stderr tail
-jgm scheduler [--once]         login-node probe: squeue/sacct (or oarstat) -> scheduler.state events
+jgm scheduler [--once]         login-node probe: squeue/sacct -> scheduler.state, tails .out/.err -> log.chunk
 jgm forward --url U --token T  login-node relay: ship the event files to a jobgpumonitor-server (POST /ingest)
 jgm emit TYPE k=v ...          emit one event from a shell script
 jgm doctor [--json]            show what is detected on this node

@@ -181,3 +181,64 @@ def test_probe_requeue_makes_new_run_dir(tmp_path):
     clock[0] += 30
     e = probe.poll()
     assert len(e) == 1 and e[0]["run_id"] == "marcel-c3/8224458/1" and e[0]["data"]["restarts"] == 1
+
+
+# --------------------------------------------------------------------------- log tailing
+
+
+def test_probe_tails_stdout_and_stderr_of_running_jobs(tmp_path):
+    out = tmp_path / "job.out"
+    err = tmp_path / "job.err"
+    out.write_text("epoch 1\nepoch 2\n")
+    err.write_text("")
+    scontrol = SCONTROL.replace("StdErr=/home/k/jgm-smoke_8224458.err", f"StdErr={err}").replace("StdOut=/home/k/jgm-smoke_8224458.out", f"StdOut={out}")
+    fake = FakeSlurm([SQUEUE_RUNNING, SQUEUE_RUNNING, SQUEUE_RUNNING, "", ""], sacct=SACCT_OOM, scontrol=scontrol)
+    clock = [5_000_000.0]
+    probe = SchedulerProbe(SlurmAdapter(fake), str(tmp_path), user=None, interval_s=30, host="l", now=lambda: clock[0])
+    probe.poll()
+    evs = read_events(str(tmp_path))
+    chunks = [e for e in evs if e["type"] == "log.chunk"]
+    assert len(chunks) == 1 and chunks[0]["data"]["stream"] == "stdout" and chunks[0]["data"]["text"] == "epoch 1\nepoch 2\n"
+    assert chunks[0]["data"]["offset"] == 0 and chunks[0]["run_id"] == "marcel-c3/8224458/0"
+    # partial line: held back until the newline arrives
+    with open(out, "a") as f:
+        f.write("epoch 3\nepo")
+    with open(err, "a") as f:
+        f.write("warning: x\n")
+    clock[0] += 30
+    probe.poll()
+    chunks = [e for e in read_events(str(tmp_path)) if e["type"] == "log.chunk"]
+    assert [(c["data"]["stream"], c["data"]["text"]) for c in chunks[1:]] == [("stdout", "epoch 3\n"), ("stderr", "warning: x\n")]
+    with open(out, "a") as f:
+        f.write("ch 4\n")
+    clock[0] += 30
+    probe.poll()
+    chunks = [e for e in read_events(str(tmp_path)) if e["type"] == "log.chunk"]
+    assert chunks[-1]["data"]["text"] == "epoch 4\n"
+    # job ends: the final chunk flushes what is left, even without a trailing newline
+    with open(out, "a") as f:
+        f.write("done")
+    clock[0] += 30
+    probe.poll()  # gone from queue -> ended; tailing continues during the grace period
+    chunks = [e for e in read_events(str(tmp_path)) if e["type"] == "log.chunk"]
+    assert chunks[-1]["data"]["text"].endswith("done") and chunks[-1]["data"]["eof"] is True
+    # restart-safe: a new probe on the same state does not resend
+    probe.close()
+    p2 = SchedulerProbe(SlurmAdapter(fake), str(tmp_path), user=None, interval_s=30, host="l", now=lambda: clock[0])
+    n = len(read_events(str(tmp_path)))
+    p2.poll()
+    assert len(read_events(str(tmp_path))) == n
+
+
+def test_probe_log_size_cap(tmp_path):
+    out = tmp_path / "big.out"
+    out.write_text("x" * 5000 + "\n")
+    scontrol = SCONTROL.replace("StdOut=/home/k/jgm-smoke_8224458.out", f"StdOut={out}").replace("StdErr=/home/k/jgm-smoke_8224458.err", f"StdErr={out}")
+    fake = FakeSlurm([SQUEUE_RUNNING], scontrol=scontrol)
+    probe = SchedulerProbe(SlurmAdapter(fake), str(tmp_path), user=None, interval_s=30, host="l", log_max_bytes=3000)
+    probe.poll()
+    probe.poll()
+    chunks = [e["data"] for e in read_events(str(tmp_path)) if e["type"] == "log.chunk"]
+    assert chunks[0]["truncated"] is False and len(chunks[0]["text"]) == 3000
+    assert chunks[1]["truncated"] is True and chunks[1]["text"] == ""
+    assert len(chunks) == 2  # dropped afterwards
