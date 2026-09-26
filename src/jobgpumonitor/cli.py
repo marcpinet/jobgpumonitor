@@ -14,6 +14,7 @@ import time
 from typing import Any, Deque, Dict, List, Optional
 
 from . import __version__
+from ._log import dbg
 from .config import Config
 from .context import build_context
 from .runtime import Run
@@ -46,9 +47,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         env.setdefault("JGM_AUTO", "1")
         hook_dir = _install_auto_hook(env)
 
+    if not args.keep_buffering:
+        env.setdefault("PYTHONUNBUFFERED", "1")  # otherwise stdout of a batch job shows up hours late
+
     tail: Deque[str] = collections.deque(maxlen=args.tail_lines)
     try:
-        child = subprocess.Popen(cmd, env=env, stderr=subprocess.PIPE, cwd=args.cwd or None)
+        child = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=args.cwd or None)
     except OSError as e:
         print(f"jgm run: cannot start {cmd[0]!r}: {e}", file=sys.stderr)
         _remove_auto_hook(hook_dir)
@@ -63,15 +67,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     payload["name"] = args.name
     run.emit("run.start", payload)
 
-    def tee() -> None:
-        """Pass the child's stderr through unchanged, as it arrives (tqdm redraws lines with
-        ``\\r`` and no newline: a line-based read would hold them back), and keep a tail of
-        whole lines, carriage returns folded to the last state of the line."""
-        assert child.stderr is not None
-        out = getattr(sys.stderr, "buffer", None)
+    chunks = _ChunkEmitter(run)
+
+    def tee(stream: str, src: Any, dst: Any) -> None:
+        """Pass the child's output through unchanged, as it arrives (tqdm redraws lines with
+        ``\\r`` and no newline: a line-based read would hold them back). stderr also feeds a
+        tail of whole lines, carriage returns folded to the last state of the line; both
+        streams are emitted as ``log.chunk`` so the dashboard shows them live."""
+        out = getattr(dst, "buffer", None)
         pending = b""
         while True:
-            chunk = child.stderr.read1(65536) if hasattr(child.stderr, "read1") else child.stderr.read(1)
+            chunk = src.read1(65536) if hasattr(src, "read1") else src.read(1)
             if not chunk:
                 break
             try:
@@ -79,20 +85,28 @@ def cmd_run(args: argparse.Namespace) -> int:
                     out.write(chunk)
                     out.flush()
                 else:
-                    sys.stderr.write(chunk.decode("utf-8", "replace"))
+                    dst.write(chunk.decode("utf-8", "replace"))
             except Exception:
                 pass
-            pending += chunk
-            *lines, pending = pending.split(b"\n")
-            for line in lines:
-                tail.append(_fold_cr(line))
-            if len(pending) > 65536:
-                pending = pending[-65536:]
-        if pending.strip():
+            chunks.feed(stream, chunk)
+            if stream == "stderr":
+                pending += chunk
+                *lines, pending = pending.split(b"\n")
+                for line in lines:
+                    tail.append(_fold_cr(line))
+                if len(pending) > 65536:
+                    pending = pending[-65536:]
+        if stream == "stderr" and pending.strip():
             tail.append(_fold_cr(pending))
+        chunks.close(stream)
 
-    t = threading.Thread(target=tee, name="jgm-stderr-tee", daemon=True)
-    t.start()
+    tees = [threading.Thread(target=tee, args=("stdout", child.stdout, sys.stdout), name="jgm-stdout-tee", daemon=True),
+            threading.Thread(target=tee, args=("stderr", child.stderr, sys.stderr), name="jgm-stderr-tee", daemon=True)]
+    for t in tees:
+        t.start()
+    pusher = _RunPusher(run) if not args.no_push else None
+    if pusher:
+        pusher.start()
 
     forwarded: Dict[int, str] = {}
 
@@ -120,7 +134,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         pass
 
     rc = child.wait()
-    t.join(2.0)
+    for t in tees:
+        t.join(5.0)
+    chunks.flush(final=True)
     sig_name: Optional[str] = None
     if rc < 0:
         try:
@@ -141,8 +157,104 @@ def cmd_run(args: argparse.Namespace) -> int:
         forwarded_signals=sorted(forwarded.values()),
     )
     run.close(3.0)
+    if pusher:
+        pusher.stop()  # last shipment: everything this job wrote, children included
     _remove_auto_hook(hook_dir)
     return exit_code
+
+
+class _ChunkEmitter:
+    """Batches the child's stdout/stderr into ``log.chunk`` events (every 2 s or 64 KB)."""
+
+    def __init__(self, run: Run, max_bytes: int = 8 * 1024 * 1024) -> None:
+        self.run = run
+        self.max_bytes = max_bytes
+        self._lock = threading.Lock()
+        self._buf: Dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+        self._offset: Dict[str, int] = {"stdout": 0, "stderr": 0}
+        self._done: Dict[str, bool] = {}
+        self._truncated: Dict[str, bool] = {}
+        self._last = time.monotonic()
+
+    def feed(self, stream: str, data: bytes) -> None:
+        with self._lock:
+            if self._truncated.get(stream):
+                return
+            self._buf[stream] += data
+            due = len(self._buf[stream]) >= 65536 or time.monotonic() - self._last >= 2.0
+        if due:
+            self.flush()
+
+    def close(self, stream: str) -> None:
+        with self._lock:
+            self._done[stream] = True
+
+    def flush(self, final: bool = False) -> None:
+        with self._lock:
+            self._last = time.monotonic()
+            for stream in ("stdout", "stderr"):
+                buf = self._buf[stream]
+                if not buf and not (final and self._done.get(stream)):
+                    continue
+                data = bytes(buf)
+                if not final:
+                    cut = max(data.rfind(b"\n"), data.rfind(b"\r")) + 1  # whole lines only while running
+                    if cut <= 0:
+                        continue
+                    data = data[:cut]
+                del buf[: len(data)]
+                offset = self._offset[stream]
+                if offset + len(data) > self.max_bytes:
+                    data = data[: max(0, self.max_bytes - offset)]
+                    self._truncated[stream] = True
+                self._offset[stream] += len(data)
+                self.run.emit("log.chunk", {
+                    "stream": stream, "path": f"<{stream}>", "offset": offset,
+                    "text": data.decode("utf-8", "replace"), "size": self._offset[stream],
+                    "truncated": bool(self._truncated.get(stream)), "eof": bool(final and self._done.get(stream)),
+                })
+
+
+class _RunPusher(threading.Thread):
+    """Ships this run's directory to the configured server every few seconds, and once more at exit."""
+
+    def __init__(self, run: Run, interval_s: float = 10.0) -> None:
+        super().__init__(name="jgm-push", daemon=True)
+        self.jrun = run
+        self.interval_s = interval_s
+        self._halt = threading.Event()
+        self.fw = None
+        remote = _remote_for(run)
+        if remote and run.base_dir and run.run_dir:
+            from .forward import Forwarder
+
+            self.fw = Forwarder(run.base_dir, remote[0], remote[1], only_dir=run.run_dir, persist=False)
+
+    def run_once(self) -> None:
+        if self.fw is None:
+            return
+        try:
+            self.jrun.flush(2.0)
+            self.fw.cycle()
+        except Exception as e:  # never disturb the job
+            dbg(f"push failed: {e}")
+
+    def run(self) -> None:  # noqa: D102
+        if self.fw is None:
+            return
+        while not self._halt.wait(self.interval_s):
+            self.run_once()
+
+    def stop(self) -> None:
+        self._halt.set()
+        self.join(2.0)
+        self.run_once()
+
+
+def _remote_for(run: Run):  # type: ignore[no-untyped-def]
+    from . import remote
+
+    return remote.load(run.base_dir)
 
 
 def _fold_cr(line: bytes) -> str:
@@ -448,15 +560,14 @@ def cmd_forward(args: argparse.Namespace) -> int:
 
     cfg = Config.from_env()
     set_debug(cfg.debug or args.verbose)
-    url = args.url or os.environ.get("JGM_FORWARD_URL")
-    token = args.token or os.environ.get("JGM_FORWARD_TOKEN")
-    if not url or not token:
-        print("jgm forward: need --url and --token (or JGM_FORWARD_URL / JGM_FORWARD_TOKEN)", file=sys.stderr)
-        return 2
     base, origin = resolve_base_dir(cfg.dir)
     if not base:
         print("jgm forward: no event directory; set JGM_DIR", file=sys.stderr)
         return 1
+    url, token = _remote_args(args, base)
+    if not url or not token:
+        print("jgm forward: no server configured; run `jgm setup --url ... --token ...` (or JGM_FORWARD_URL / JGM_FORWARD_TOKEN)", file=sys.stderr)
+        return 2
     fw = Forwarder(base, url.rstrip("/"), token)
     print(f"jgm forward: {base} [{origin}] -> {url}  every {args.interval:.0f}s"
           + (f"  proxy={os.environ.get('https_proxy')}" if os.environ.get("https_proxy") else ""), file=sys.stderr)
@@ -466,6 +577,95 @@ def cmd_forward(args: argparse.Namespace) -> int:
         return 0 if r["ok"] else 1
     fw.run_forever(args.interval)
     return 0
+
+
+def _remote_args(args: argparse.Namespace, base: str) -> tuple[Optional[str], Optional[str]]:
+    from . import remote
+
+    url = getattr(args, "url", None)
+    token = getattr(args, "token", None)
+    if url and token:
+        return url.rstrip("/"), token
+    found = remote.load(base)
+    if found:
+        return found[0] if not url else url.rstrip("/"), found[1] if not token else token
+    return url, token
+
+
+# --------------------------------------------------------------------------- jgm setup / agent
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    from . import remote
+
+    cfg = Config.from_env()
+    base, origin = resolve_base_dir(cfg.dir)
+    if not base:
+        print("jgm setup: no writable event directory; set JGM_DIR", file=sys.stderr)
+        return 1
+    url = args.url.rstrip("/")
+    ok, msg = remote.check(url, args.token)
+    if not ok and not args.force:
+        print(f"jgm setup: cannot reach {url}: {msg}\n  (use --force to save anyway)", file=sys.stderr)
+        return 1
+    p = remote.save(base, url, args.token, {"cluster": cfg.cluster} if cfg.cluster else None)
+    print(f"jgm setup: server {url} {'verified' if ok else 'saved without verification'}; config in {p}")
+    print("  every job wrapped with `jgm run` (and every process with JGM_AUTO=1) now ships its events there.")
+    print("  optional, for Slurm verdicts/queue state: `jgm agent install` on the login node.")
+    return 0
+
+
+def cmd_agent(args: argparse.Namespace) -> int:
+    from . import agent
+    from ._log import set_debug
+
+    cfg = Config.from_env()
+    set_debug(cfg.debug or getattr(args, "verbose", False))
+    base, origin = resolve_base_dir(cfg.dir)
+    if not base:
+        print("jgm agent: no writable event directory; set JGM_DIR", file=sys.stderr)
+        return 1
+    action = args.action
+    if action == "status":
+        pid = agent.running_pid(base)
+        print(f"jgm agent: {'running, pid ' + str(pid) if pid else 'not running'}  dir={base}  log={agent.log_path(base)}")
+        return 0 if pid else 3
+    if action == "stop":
+        agent.remove_cron()
+        print("jgm agent: stopped" if agent.stop(base) else "jgm agent: was not running", file=sys.stderr)
+        return 0
+    url, token = _remote_args(args, base)
+    if not url or not token:
+        print("jgm agent: no server configured; run `jgm setup --url ... --token ...` first", file=sys.stderr)
+        return 2
+    user: Optional[str] = None if args.all_users else (args.user or os.environ.get("USER") or os.environ.get("LOGNAME"))
+    extra = ["--interval", str(args.interval)]
+    if args.all_users:
+        extra.append("--all-users")
+    elif args.user:
+        extra += ["--user", args.user]
+    if args.scheduler:
+        extra += ["--scheduler", args.scheduler]
+    if args.no_logs:
+        extra.append("--no-logs")
+    if action == "serve":
+        return agent.serve(base, url, token, args.interval, cfg.cluster, user, args.scheduler, tail_logs=not args.no_logs)
+    if action in ("install", "keepalive", "start"):
+        pid = agent.running_pid(base)
+        if pid:
+            if action != "keepalive":
+                print(f"jgm agent: already running (pid {pid})", file=sys.stderr)
+            return 0
+        pid = agent.start_detached(base, extra)
+        if action == "install":
+            cron = agent.install_cron(base, extra)
+            print(f"jgm agent: started (pid {pid}), log in {agent.log_path(base)}")
+            print("  crontab keepalive installed: restarts it within 5 min if it dies or the node reboots" if cron
+                  else "  no crontab here: re-run `jgm agent start` after a reboot")
+        elif action == "start":
+            print(f"jgm agent: started (pid {pid})", file=sys.stderr)
+        return 0
+    return 2
 
 
 # --------------------------------------------------------------------------- main
@@ -482,6 +682,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--tail-lines", type=int, default=100, help="stderr lines kept for run.end")
     r.add_argument("--no-forward", action="store_true", help="do not forward signals to the child")
     r.add_argument("--no-auto", action="store_true", help="do not auto-instrument the Python processes the command starts")
+    r.add_argument("--no-push", action="store_true", help="do not ship events to the configured server from the job")
+    r.add_argument("--keep-buffering", action="store_true", help="do not set PYTHONUNBUFFERED=1 for the command")
     r.add_argument("cmd", nargs=argparse.REMAINDER)
     r.set_defaults(func=cmd_run)
 
@@ -520,6 +722,24 @@ def build_parser() -> argparse.ArgumentParser:
     fw.add_argument("--once", action="store_true", help="ship what is new and exit")
     fw.add_argument("-v", "--verbose", action="store_true")
     fw.set_defaults(func=cmd_forward)
+
+    st = sub.add_parser("setup", help="record the server to ship events to (once, in the shared event directory)")
+    st.add_argument("--url", required=True, help="ingest endpoint, e.g. https://host/jgm/ingest")
+    st.add_argument("--token", required=True, help="the server's ingest token")
+    st.add_argument("--force", action="store_true", help="save even if the server cannot be reached now")
+    st.set_defaults(func=cmd_setup)
+
+    ag = sub.add_parser("agent", help="login-node companion: scheduler probe + forwarder, detached, kept alive by cron")
+    ag.add_argument("action", choices=["install", "start", "stop", "status", "keepalive", "serve"])
+    ag.add_argument("--url")
+    ag.add_argument("--token")
+    ag.add_argument("--interval", type=float, default=30.0, help="seconds between scheduler polls (default 30)")
+    ag.add_argument("--user", help="only this user's jobs (default: $USER)")
+    ag.add_argument("--all-users", action="store_true")
+    ag.add_argument("--scheduler", choices=["slurm", "oar"])
+    ag.add_argument("--no-logs", action="store_true", help="do not tail the jobs' stdout/stderr files")
+    ag.add_argument("-v", "--verbose", action="store_true")
+    ag.set_defaults(func=cmd_agent)
 
     v = sub.add_parser("version")
     v.set_defaults(func=lambda a: print(__version__) or 0)

@@ -408,11 +408,26 @@ class Run:
             self.emit("run.end", data)
             self.ended = True
         self.flush(5.0)
+        self._push_at_end()
         if self.gpu:
             try:
                 self.gpu.close()
             except Exception:
                 pass
+
+    def _push_at_end(self) -> None:
+        """Not under ``jgm run`` (which ships the whole run directory): ship our own file now."""
+        if self.ctx.get("wrapped") or self.source != "process" or not self.base_dir or not self.run_dir:
+            return
+        try:
+            from . import remote
+            from .forward import Forwarder
+
+            found = remote.load(self.base_dir)
+            if found:
+                Forwarder(self.base_dir, found[0], found[1], only_dir=self.run_dir, persist=False).cycle()
+        except Exception as e:
+            dbg(f"push at end failed: {e}")
 
     def flush(self, timeout: float = 5.0) -> bool:
         if self._writer is None:

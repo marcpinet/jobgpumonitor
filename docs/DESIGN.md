@@ -194,6 +194,9 @@ tests/               unitaires (contexte, sinks, hooks), intégration (sous-proc
 
 ## 11. État au 2026-09-03
 
+2026-09-26, v0.5.0 : autonomie du zipapp. `jgm setup` écrit `remote.json` (URL + jeton) dans le dossier partagé ; `jgm run` tee stdout/stderr en `log.chunk` et pousse lui-même son dossier de run au serveur toutes les 10 s et à la fin (les enfants auto-instrumentés compris) ; un run non enveloppé pousse son fichier à la fin. Plus besoin de relais sur le login node pour les jobs. `jgm agent install` remplace le tmux : sonde + forwarder détachés, pidfile, keepalive cron. Côté serveur, un flux de log appartient au premier émetteur (wrapper ou sonde).
+
+
 2026-09-26, v0.4.0 : niveau L1 livré. `JGM_AUTO=1` via un `.pth` (installation pip) ou le `sitecustomize.py` du zipapp ; `jgm run` place le zipapp/checkout et un hook sur le `PYTHONPATH` de l'enfant et pose `JGM_AUTO`, donc tout Python lancé par la commande est instrumenté sans import. Les interpréteurs auxiliaires d'un programme déjà suivi (`JGM_IN_TREE`) se taisent sauf les rangs distribués. `jgm.pyz` (54 Ko) publié à chaque release pour les login nodes sans pip.
 
 

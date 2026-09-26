@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jobgpumonitor"
-version = "0.4.1"
+version = "0.5.0"
 description = "Zero-dependency emitter that watches a running (Slurm/OAR/local) GPU job and streams structured events."
 readme = "README.md"
 license = "MIT"

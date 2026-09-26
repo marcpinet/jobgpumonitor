@@ -46,8 +46,13 @@ class Forwarder:
         max_line: int = 4 * 1024 * 1024,
         post: Poster = None,  # type: ignore[assignment]
         host: Optional[str] = None,
+        only_dir: Optional[str] = None,
+        persist: bool = True,
     ) -> None:
         self.base_dir = base_dir
+        #: ship this run directory only (the wrapper inside a job), offsets kept in memory
+        self.only_dir = only_dir
+        self.persist = persist
         self.url = url
         self.token = token
         self.batch_events = batch_events
@@ -65,6 +70,8 @@ class Forwarder:
     # ------------------------------------------------------------------ state
 
     def _load(self) -> None:
+        if not self.persist:
+            return
         try:
             with open(self.state_path, encoding="utf-8") as f:
                 data = json.load(f)
@@ -74,6 +81,8 @@ class Forwarder:
             pass
 
     def _save(self) -> None:
+        if not self.persist:
+            return
         try:
             os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
             tmp = self.state_path + ".tmp"
@@ -86,6 +95,8 @@ class Forwarder:
     # ------------------------------------------------------------------ reading
 
     def files(self) -> List[str]:
+        if self.only_dir:
+            return sorted(glob.glob(os.path.join(self.only_dir, "*.jsonl")))
         return sorted(glob.glob(os.path.join(self.base_dir, "runs", "*", "*", "*", "*.jsonl")))
 
     def _read_new(self, path: str) -> Tuple[List[Dict[str, Any]], int, int]:

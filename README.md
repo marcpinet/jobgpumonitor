@@ -29,29 +29,37 @@ so a notifier, a dashboard or a one-line `grep` can read it. No network from the
 
 ## 30-second start
 
-```bash
-pip install jobgpumonitor
-```
-
-```python
-import jobgpumonitor.auto
-```
-
-That is the whole integration. No line at all, nothing installed in the job's
-environment? Wrap the command: every Python it starts then monitors itself (tqdm,
-metrics, traceback, GPU, memory), and any other language gets exit code and stderr.
+On the cluster, once, no root, no pip, no venv (a single 60 KB file, Python >= 3.9):
 
 ```bash
-jgm run -- python train.py
-jgm run -- bash -c "python prep.py && python train.py"
+mkdir -p ~/.jobgpumonitor
+curl -L https://github.com/marcpinet/jobgpumonitor/releases/latest/download/jgm.pyz -o ~/.jobgpumonitor/jgm.pyz
+python3 ~/.jobgpumonitor/jgm.pyz setup --url https://your-server/jgm/ingest --token <ingest token>
 ```
 
-With the package installed in the job's Python, `export JGM_AUTO=1` in the batch
-script does the same without the wrapper. Helper interpreters spawned by a monitored
-program (`python -c` probes, tooling) stay quiet; distributed ranks still report.
+Then wrap the command of your jobs. Nothing to install in the job's environment, not a
+line to add to your code: every Python it starts monitors itself (tqdm, metrics,
+traceback, GPU, memory), stdout and stderr are streamed live, and the job ships its own
+events to the server as it runs.
 
-Events land in `~/.jobgpumonitor/runs/<cluster>/<job>/<restart>/`. Run `jgm doctor` on a node
-to see what gets detected.
+```bash
+python3 ~/.jobgpumonitor/jgm.pyz run -- python train.py
+python3 ~/.jobgpumonitor/jgm.pyz run -- bash -c "python prep.py && python train.py"
+```
+
+With `pip install jobgpumonitor` instead, the same is `jgm run -- ...`, or one line in the
+code, `import jobgpumonitor.auto`, or `export JGM_AUTO=1` in the batch script.
+
+Optional, for what only the scheduler knows (queue state, OOM / time-out verdicts after a
+SIGKILL, the `.out` / `.err` of jobs that were not wrapped): one command on the login node,
+which detaches itself and stays alive through cron, no tmux to babysit:
+
+```bash
+python3 ~/.jobgpumonitor/jgm.pyz agent install
+```
+
+Events also land in `~/.jobgpumonitor/runs/<cluster>/<job>/<restart>/` as JSONL, whether or
+not a server is configured. `jgm doctor` shows what gets detected on a node.
 
 ## What the job tells you
 
@@ -94,9 +102,11 @@ srun --container-mounts="$HOME/.jobgpumonitor:/jgm" jgm run -- python train.py
 `jgm` ships with the package (short for **j**ob**g**pu**m**onitor); `python -m jobgpumonitor.cli` is equivalent.
 
 ```
-jgm run [--name N] -- CMD...   run a command under monitoring, forward signals, keep the stderr tail
-jgm scheduler [--once]         login-node probe: squeue/sacct -> scheduler.state, tails .out/.err -> log.chunk
-jgm forward --url U --token T  login-node relay: ship the event files to a jobgpumonitor-server (POST /ingest)
+jgm run [--name N] -- CMD...   run a command under monitoring: auto-instruments its Pythons, streams stdout/stderr, ships events
+jgm setup --url U --token T    record the server once (shared event dir); jobs and the agent read it
+jgm agent install|status|stop  login-node companion (scheduler probe + forwarder), detached, cron keepalive
+jgm scheduler [--once]         the scheduler probe alone, in the foreground
+jgm forward [--once]           the forwarder alone, in the foreground
 jgm emit TYPE k=v ...          emit one event from a shell script
 jgm doctor [--json]            show what is detected on this node
 jgm ls [--dir D]               list runs found in the event directory
