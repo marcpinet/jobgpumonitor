@@ -136,12 +136,7 @@ def test_agent_start_status_stop(runner, tmp_path):
     assert subprocess.run(jgm + ["status"], env=env, capture_output=True, timeout=60).returncode == 3
     p = subprocess.run(jgm + ["start"], env=env, capture_output=True, text=True, timeout=60)
     assert p.returncode == 0, p.stderr
-    import time
-
-    for _ in range(50):
-        if subprocess.run(jgm + ["status"], env=env, capture_output=True, timeout=60).returncode == 0:
-            break
-        time.sleep(0.2)
+    # no race: `status` right after `start` already sees the agent
     st = subprocess.run(jgm + ["status"], env=env, capture_output=True, text=True, timeout=60)
     assert st.returncode == 0 and "running" in st.stdout
     assert subprocess.run(jgm + ["start"], env=env, capture_output=True, text=True, timeout=60).stderr.strip().startswith("jgm agent: already running")
@@ -149,3 +144,17 @@ def test_agent_start_status_stop(runner, tmp_path):
     assert subprocess.run(jgm + ["status"], env=env, capture_output=True, timeout=60).returncode == 3
     srv.shutdown()
     assert "forwarding only" in (runner.dir / "agent" / "agent.log").read_text()
+
+
+def test_agent_start_reports_immediate_death(runner, monkeypatch):
+    """An agent that cannot start must not be announced as started (nor leave a stale pid)."""
+    import pytest
+
+    from jobgpumonitor import agent
+
+    monkeypatch.setenv("PYTHONPATH", runner.env.get("PYTHONPATH", ""))
+    base = str(runner.dir)
+    with pytest.raises(RuntimeError, match="exited immediately"):
+        agent.start_detached(base, ["--this-flag-does-not-exist"], settle_s=10.0)
+    assert agent.running_pid(base) is None
+    assert "unrecognized arguments" in (runner.dir / "agent" / "agent.log").read_text()

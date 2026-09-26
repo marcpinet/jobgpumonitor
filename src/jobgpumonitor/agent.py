@@ -109,14 +109,40 @@ def serve(base_dir: str, url: str, token: str, interval_s: float, cluster: Optio
     return 0
 
 
-def start_detached(base_dir: str, extra_args: list) -> int:
-    """Launch ``jgm agent serve`` as a daemon: new session, no controlling terminal, log file."""
+def start_detached(base_dir: str, extra_args: list, settle_s: float = 2.0) -> int:
+    """Launch ``jgm agent serve`` as a daemon: new session, no controlling terminal, log file.
+
+    The pid file is written here, before returning, so ``jgm agent status`` right after
+    ``start`` sees it; the child rewrites the same value once up. Raises ``RuntimeError``
+    (with the log tail) when the agent dies within ``settle_s``.
+    """
     os.makedirs(os.path.dirname(log_path(base_dir)), exist_ok=True)
     cmd = [sys.executable, *_self_argv(), "agent", "serve", *extra_args]
     with open(log_path(base_dir), "ab") as log:
         p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                              start_new_session=True, close_fds=True, env=dict(os.environ, JGM_DIR=base_dir))
-    return p.pid
+    with open(pid_path(base_dir), "w", encoding="utf-8") as f:
+        f.write(str(p.pid))
+    try:
+        rc = p.wait(timeout=settle_s)
+    except subprocess.TimeoutExpired:
+        return p.pid
+    try:
+        os.remove(pid_path(base_dir))
+    except OSError:
+        pass
+    raise RuntimeError(f"agent exited immediately (code {rc}); last log lines:\n{_log_tail(base_dir)}")
+
+
+def _log_tail(base_dir: str, n: int = 15) -> str:
+    try:
+        with open(log_path(base_dir), "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 8192))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+        return "\n".join("  " + ln for ln in lines[-n:]) or "  (empty)"
+    except OSError:
+        return "  (no log)"
 
 
 def _self_argv() -> list:

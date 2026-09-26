@@ -656,7 +656,11 @@ def cmd_agent(args: argparse.Namespace) -> int:
             if action != "keepalive":
                 print(f"jgm agent: already running (pid {pid})", file=sys.stderr)
             return 0
-        pid = agent.start_detached(base, extra)
+        try:
+            pid = agent.start_detached(base, extra)
+        except RuntimeError as e:
+            print(f"jgm agent: {e}", file=sys.stderr)
+            return 1
         if action == "install":
             cron = agent.install_cron(base, extra)
             print(f"jgm agent: started (pid {pid}), log in {agent.log_path(base)}")
