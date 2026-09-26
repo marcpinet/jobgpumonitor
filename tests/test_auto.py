@@ -73,6 +73,9 @@ def test_pth_hook_with_plain_python_and_jgm_auto(runner, tmp_path):
     site = json.loads(subprocess.check_output([str(py), "-c", "import json,site;print(json.dumps(site.getsitepackages()))"]))[0]
     shutil.copytree(SRC / "jobgpumonitor", Path(site) / "jobgpumonitor", ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copy(SRC / "jobgpumonitor_auto.pth", Path(site) / "jobgpumonitor_auto.pth")
+    # tqdm/psutil live in the site-packages of the interpreter running the tests, which is
+    # not the venv's "system" interpreter when pytest itself runs inside a virtualenv
+    (Path(site) / "test_deps.pth").write_text("\n".join(p for p in sys.path if p.endswith("site-packages")) + "\n")
     prog = tmp_path / "prog.py"
     prog.write_text(PROG)
     env = {k: v for k, v in runner.env.items() if k != "PYTHONPATH"}
@@ -110,6 +113,16 @@ def test_autohook_skips_tooling(monkeypatch):
         monkeypatch.setattr(sys, "orig_argv", list(argv), raising=False)
         monkeypatch.setattr(sys, "argv", [argv[-1]])
         assert _autohook._wanted() is expected, argv
+    # Python < 3.10 without /proc: sys.argv is still ['-m'] at start-up -> stay silent
+    monkeypatch.delattr(sys, "orig_argv", raising=False)
+    monkeypatch.setattr(_autohook, "open", lambda *a, **k: (_ for _ in ()).throw(OSError()), raising=False)
+    monkeypatch.setattr(sys, "argv", ["-m"])
+    assert _autohook._wanted() is False
+    monkeypatch.setattr(sys, "argv", ["-m", "--version"])  # what 3.9 shows for `-m pip --version`
+    assert _autohook._wanted() is False
+    monkeypatch.setattr(sys, "argv", ["/x/train.py"])
+    assert _autohook._wanted() is True
+    monkeypatch.delattr(_autohook, "open")
     monkeypatch.setattr(sys, "orig_argv", ["python", "train.py"], raising=False)
     monkeypatch.setenv("JGM_IN_TREE", "123")
     assert _autohook._wanted() is False  # helper interpreter of a monitored program

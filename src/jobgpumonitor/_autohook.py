@@ -23,7 +23,22 @@ def _program() -> "tuple[str, str]":
     ("command", "-c")... At start-up ``sys.argv`` is not final yet for ``-m``/``-c`` runs,
     ``sys.orig_argv`` (3.10+) has the real command line."""
     orig = getattr(sys, "orig_argv", None)
-    args = list(orig)[1:] if orig else list(sys.argv)
+    if not orig:  # Python < 3.10: the kernel still knows the real command line on Linux
+        try:
+            with open("/proc/self/cmdline", "rb") as f:
+                orig = [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+        except OSError:
+            orig = None
+    if not orig:
+        # only sys.argv, rewritten by the interpreter: the module of a ``-m`` run is
+        # already gone (``['-m', '--version']``), it cannot be told from a user's program
+        argv = list(sys.argv)
+        if argv and argv[0] == "-m":
+            return ("module", "")
+        if argv and argv[0] == "-c":
+            return ("command", "")
+        return ("script", argv[0]) if argv and argv[0] else ("interactive", "")
+    args = list(orig)[1:]
     i = 0
     while i < len(args):
         a = args[i]
@@ -42,8 +57,8 @@ def _wanted() -> bool:
     if os.environ.get("JGM_AUTO", "").strip().lower() not in ("1", "true", "yes", "on"):
         return False
     kind, name = _program()
-    if kind == "module" and (name.split(".")[0] in _SKIP_MODULES):
-        return False
+    if kind == "module" and (not name or name.split(".")[0] in _SKIP_MODULES):
+        return False  # unknown module (no orig_argv, no /proc): better silent than wrong
     if kind == "script":
         base = os.path.basename(name)
         norm = name.replace("\\", "/")
