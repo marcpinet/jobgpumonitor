@@ -464,7 +464,7 @@ def build_context(config: Any, source: str = "process", env: Optional[Mapping[st
         "ppid": os.getppid(),
         "user": _safe_user(env),
         "cwd": cwd,
-        "argv": list(sys.argv) if source == "process" else None,
+        "argv": _real_argv() if source == "process" else None,
         "main_file": main_file if source == "process" else None,
         "executable": sys.executable,
         "python": platform.python_version(),
@@ -485,6 +485,16 @@ def build_context(config: Any, source: str = "process", env: Optional[Mapping[st
         ctx["mounts"] = mount_points()
     dbg(f"context run_id={run_id} emitter={emitter} scheduler={job['name']} rank={rank}")
     return ctx
+
+
+def _real_argv() -> List[str]:
+    """``sys.argv`` is still ``['-m']`` / ``['-c']`` while site-packages hooks run; the
+    original command line (3.10+) tells what is actually being executed."""
+    argv = list(sys.argv)
+    orig = list(getattr(sys, "orig_argv", None) or [])
+    if orig and (not argv or argv[0] in ("-m", "-c", "")):
+        return orig[1:]
+    return argv
 
 
 def _cwd_ok() -> bool:

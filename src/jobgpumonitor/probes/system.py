@@ -24,6 +24,7 @@ class ProcessProbe:
         self._last_cpu_ticks: Optional[int] = None
         self._last_wall: Optional[float] = None
         self._tick = None
+        self._children: Dict[int, Any] = {}
         try:
             self._tick = os.sysconf("SC_CLK_TCK")
         except (ValueError, OSError, AttributeError):
@@ -58,13 +59,29 @@ class ProcessProbe:
             children = p.children(recursive=True)[:64]
             if children:
                 rss = 0
+                cpu = 0.0
+                seen = set()
                 for c in children:
                     try:
+                        seen.add(c.pid)
+                        known = self._children.get(c.pid)
+                        if known is None or known.create_time() != c.create_time():
+                            c.cpu_percent(interval=None)  # prime: the first call always reads 0
+                            self._children[c.pid] = c
+                        else:
+                            cpu += known.cpu_percent(interval=None)
                         rss += c.memory_info().rss
                     except Exception:
                         continue
+                for pid in [k for k in self._children if k not in seen]:
+                    del self._children[pid]
                 out["children"] = len(children)
                 out["children_rss"] = int(rss)
+                out["children_cpu_pct"] = round(cpu, 1)
+                # what the job really burns: the wrapper's child is a shell, the work is below it
+                out["cpu_pct"] = round(out["cpu_pct"] + cpu, 1)
+            else:
+                self._children.clear()
         except Exception:
             pass
         try:

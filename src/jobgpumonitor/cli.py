@@ -39,12 +39,19 @@ def cmd_run(args: argparse.Namespace) -> int:
         ctx["job"]["job_name"] = ctx["job"].get("job_name") or args.name
     env = dict(os.environ)
     env["JGM_WRAPPED"] = "1"
+    hook_dir: Optional[str] = None
+    if not args.no_auto:
+        # Every Python the command starts monitors itself (tqdm, metrics, traceback...),
+        # without pip install nor a line of code: JGM_AUTO + a start-up hook on PYTHONPATH.
+        env.setdefault("JGM_AUTO", "1")
+        hook_dir = _install_auto_hook(env)
 
     tail: Deque[str] = collections.deque(maxlen=args.tail_lines)
     try:
         child = subprocess.Popen(cmd, env=env, stderr=subprocess.PIPE, cwd=args.cwd or None)
     except OSError as e:
         print(f"jgm run: cannot start {cmd[0]!r}: {e}", file=sys.stderr)
+        _remove_auto_hook(hook_dir)
         return 127
 
     run = Run(cfg, ctx, source="wrapper", hooks=False, monitor=True, probe_pid=child.pid)
@@ -57,18 +64,32 @@ def cmd_run(args: argparse.Namespace) -> int:
     run.emit("run.start", payload)
 
     def tee() -> None:
+        """Pass the child's stderr through unchanged, as it arrives (tqdm redraws lines with
+        ``\\r`` and no newline: a line-based read would hold them back), and keep a tail of
+        whole lines, carriage returns folded to the last state of the line."""
         assert child.stderr is not None
         out = getattr(sys.stderr, "buffer", None)
-        for raw in iter(child.stderr.readline, b""):
+        pending = b""
+        while True:
+            chunk = child.stderr.read1(65536) if hasattr(child.stderr, "read1") else child.stderr.read(1)
+            if not chunk:
+                break
             try:
                 if out is not None:
-                    out.write(raw)
+                    out.write(chunk)
                     out.flush()
                 else:
-                    sys.stderr.write(raw.decode("utf-8", "replace"))
+                    sys.stderr.write(chunk.decode("utf-8", "replace"))
             except Exception:
                 pass
-            tail.append(raw.decode("utf-8", "replace").rstrip("\n")[:2000])
+            pending += chunk
+            *lines, pending = pending.split(b"\n")
+            for line in lines:
+                tail.append(_fold_cr(line))
+            if len(pending) > 65536:
+                pending = pending[-65536:]
+        if pending.strip():
+            tail.append(_fold_cr(pending))
 
     t = threading.Thread(target=tee, name="jgm-stderr-tee", daemon=True)
     t.start()
@@ -120,7 +141,72 @@ def cmd_run(args: argparse.Namespace) -> int:
         forwarded_signals=sorted(forwarded.values()),
     )
     run.close(3.0)
+    _remove_auto_hook(hook_dir)
     return exit_code
+
+
+def _fold_cr(line: bytes) -> str:
+    """``b"10%\\r20%\\r30%"`` -> ``"30%"``: what the terminal would show at the end."""
+    parts = [p for p in line.split(b"\r") if p]
+    text = (parts[-1] if parts else b"").decode("utf-8", "replace")
+    return text[:2000]
+
+
+def _install_auto_hook(env: Dict[str, str]) -> Optional[str]:
+    """Make ``import jobgpumonitor`` and the start-up hook reachable by the child.
+
+    Adds to the child's PYTHONPATH: the zipapp or ``src`` checkout we run from (not a
+    site-packages dir, which would leak this environment into another interpreter), and
+    a temporary directory holding a ``sitecustomize.py`` that runs the hook and then hands
+    over to the environment's own sitecustomize, if it has one.
+    """
+    import tempfile
+
+    entries: List[str] = []
+    try:
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # zipapp file or src dir
+        if os.path.basename(here) not in ("site-packages", "dist-packages"):
+            entries.append(here)
+    except Exception:
+        pass
+    hook_dir: Optional[str] = None
+    try:
+        hook_dir = tempfile.mkdtemp(prefix="jgm-hook-")
+        with open(os.path.join(hook_dir, "sitecustomize.py"), "w", encoding="utf-8") as f:
+            f.write(_SITECUSTOMIZE)
+        entries.append(hook_dir)
+    except OSError:
+        hook_dir = None
+    if entries:
+        prev = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = os.pathsep.join(entries + ([prev] if prev else []))
+    return hook_dir
+
+
+def _remove_auto_hook(hook_dir: Optional[str]) -> None:
+    if hook_dir:
+        import shutil
+
+        shutil.rmtree(hook_dir, ignore_errors=True)
+
+
+_SITECUSTOMIZE = """\
+import os, sys
+_here = os.path.dirname(os.path.abspath(__file__))
+try:
+    import jobgpumonitor._autohook  # noqa: F401
+except Exception:
+    pass
+try:
+    import importlib.machinery, importlib.util
+    _others = [p for p in sys.path if os.path.abspath(p) != _here]
+    _spec = importlib.machinery.PathFinder.find_spec("sitecustomize", _others)
+    if _spec is not None and _spec.origin != __file__ and _spec.loader is not None:
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+except Exception:
+    pass
+"""
 
 
 # --------------------------------------------------------------------------- jgm emit
@@ -395,6 +481,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--cwd", help="working directory for the command")
     r.add_argument("--tail-lines", type=int, default=100, help="stderr lines kept for run.end")
     r.add_argument("--no-forward", action="store_true", help="do not forward signals to the child")
+    r.add_argument("--no-auto", action="store_true", help="do not auto-instrument the Python processes the command starts")
     r.add_argument("cmd", nargs=argparse.REMAINDER)
     r.set_defaults(func=cmd_run)
 

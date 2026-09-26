@@ -194,6 +194,9 @@ tests/               unitaires (contexte, sinks, hooks), intégration (sous-proc
 
 ## 11. État au 2026-09-03
 
+2026-09-26, v0.4.0 : niveau L1 livré. `JGM_AUTO=1` via un `.pth` (installation pip) ou le `sitecustomize.py` du zipapp ; `jgm run` place le zipapp/checkout et un hook sur le `PYTHONPATH` de l'enfant et pose `JGM_AUTO`, donc tout Python lancé par la commande est instrumenté sans import. Les interpréteurs auxiliaires d'un programme déjà suivi (`JGM_IN_TREE`) se taisent sauf les rangs distribués. `jgm.pyz` (54 Ko) publié à chaque release pour les login nodes sans pip.
+
+
 Phase 2, sonde ordonnanceur : `jgm scheduler` implémentée (Slurm complet via squeue/scontrol/sacct, OAR best effort via oarstat -J), événements `scheduler.state` dans les dossiers de run, fichier d'état pour la reprise, heartbeat de la sonde. Tests avec sorties simulées ; à valider sur marcel-c3.
 
 

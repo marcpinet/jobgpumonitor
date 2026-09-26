@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jobgpumonitor"
-version = "0.3.1"
+version = "0.4.0"
 description = "Zero-dependency emitter that watches a running (Slurm/OAR/local) GPU job and streams structured events."
 readme = "README.md"
 license = "MIT"
@@ -34,6 +34,11 @@ Homepage = "https://github.com/marcpinet/jobgpumonitor"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jobgpumonitor"]
+
+# Start-up hook (JGM_AUTO=1): a .pth at the wheel root is installed into site-packages
+# and imported by every interpreter of that environment, like coverage.py's.
+[tool.hatch.build.targets.wheel.force-include]
+"src/jobgpumonitor_auto.pth" = "jobgpumonitor_auto.pth"
 
 [tool.hatch.build.targets.sdist]
 include = ["src", "schema", "docs", "tests", "README.md", "pyproject.toml"]

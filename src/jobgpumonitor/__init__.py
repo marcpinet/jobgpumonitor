@@ -8,13 +8,14 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from typing import Any, Dict, Optional
 
 from .config import Config
 from .runtime import Run, in_child_process
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 __all__ = ["watch", "log", "emit", "finish", "current_run", "Run", "Config", "__version__"]
 
 _run: Optional[Run] = None
@@ -38,6 +39,9 @@ def watch(**overrides: Any) -> Run:
         _run = run
     try:
         run.start()
+        if run.enabled:
+            # subprocesses of a monitored program stay quiet (see _autohook), except ranks
+            os.environ.setdefault("JGM_IN_TREE", str(os.getpid()))
     except Exception as e:  # never break the host program
         from ._log import dbg
 

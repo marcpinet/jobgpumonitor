@@ -37,11 +37,18 @@ pip install jobgpumonitor
 import jobgpumonitor.auto
 ```
 
-That is the whole integration. No code at all? Wrap the command instead:
+That is the whole integration. No line at all, nothing installed in the job's
+environment? Wrap the command: every Python it starts then monitors itself (tqdm,
+metrics, traceback, GPU, memory), and any other language gets exit code and stderr.
 
 ```bash
 jgm run -- python train.py
+jgm run -- bash -c "python prep.py && python train.py"
 ```
+
+With the package installed in the job's Python, `export JGM_AUTO=1` in the batch
+script does the same without the wrapper. Helper interpreters spawned by a monitored
+program (`python -c` probes, tooling) stay quiet; distributed ranks still report.
 
 Events land in `~/.jobgpumonitor/runs/<cluster>/<job>/<restart>/`. Run `jgm doctor` on a node
 to see what gets detected.
