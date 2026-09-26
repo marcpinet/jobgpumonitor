@@ -22,10 +22,16 @@ jobs:
           v=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           test "v$v" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != v$v"; exit 1; }
       - run: python -m build
+      # the zipapp goes to its own folder: dist/ is what gets uploaded to PyPI
+      - run: python scripts/build_zipapp.py zipapp/jgm.pyz && python zipapp/jgm.pyz --version
       - uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zipapp
+          path: zipapp/
 
   publish:
     needs: build
@@ -39,9 +45,15 @@ jobs:
         with:
           name: dist
           path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: zipapp
+          path: zipapp/
       - uses: pypa/gh-action-pypi-publish@release/v1
       - name: GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: |
+            dist/*
+            zipapp/jgm.pyz
           generate_release_notes: true

@@ -98,6 +98,29 @@ jgm ls [--dir D]               list runs found in the event directory
 Keep the probe alive on the login node with `tmux` or `systemd --user`, or run
 `jgm scheduler --once` from cron.
 
+## Restricted HPC login nodes
+
+Some login nodes ship Python but no `pip`, no `ensurepip`, no root, and a per-process
+memory cap small enough to kill `pip` or `uv` during dependency resolution. The emitter
+has no dependencies, so it does not need any of that. Two supported ways to run it:
+
+```bash
+# a) one file, any Python >= 3.9, no install: from the GitHub release assets
+curl -L https://github.com/marcpinet/jobgpumonitor/releases/latest/download/jgm.pyz -o ~/jgm.pyz
+python3 ~/jgm.pyz scheduler
+python3 ~/jgm.pyz forward --url https://your-server/jgm/ingest --token ...
+```
+
+```bash
+# b) straight from a checkout
+git clone https://github.com/marcpinet/jobgpumonitor && cd jobgpumonitor
+PYTHONPATH=src python3 -m jobgpumonitor scheduler
+```
+
+The zipapp runs in well under 30 MB of RSS. Keep `jobgpumonitor-server` on a less
+restricted machine and let `jgm forward` ship the events to it: only the zero-dependency
+client has to live on the cluster.
+
 ## Configuration
 
 Every knob is a `JGM_*` environment variable, all optional.
