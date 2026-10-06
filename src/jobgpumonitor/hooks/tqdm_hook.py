@@ -58,16 +58,20 @@ def install(run: Run) -> None:
             return
         orig_display = cls.display
         orig_close = cls.close
-        min_interval = run.config.progress_s
+        cfg = run.config
+        t0 = run._t0  # start of the run, not of the import of tqdm
 
         def display(self: Any, *args: Any, **kwargs: Any) -> Any:
             result = orig_display(self, *args, **kwargs)
             try:
                 if not getattr(self, "disable", False):
                     now = time.monotonic()
-                    last = getattr(self, "_jgm_last", 0.0)
-                    if now - last >= min_interval:
-                        if not hasattr(self, "_jgm_id"):
+                    # a bar refreshes ~10 times a second: one event a second at first, then a
+                    # few a minute (a long job would otherwise write ~35 MB a day per bar)
+                    interval = cfg.progress_s if now - t0 < cfg.progress_slow_after_s else cfg.progress_slow_s
+                    new = not hasattr(self, "_jgm_id")
+                    if new or now - getattr(self, "_jgm_last", 0.0) >= interval:
+                        if new:
                             self._jgm_id = next(_bar_ids)
                         self._jgm_last = now
                         payload = _bar_payload(self, done=False)

@@ -52,12 +52,15 @@ class SchedulerProbe:
         now=time.time,  # type: ignore[no-untyped-def]
         tail_logs: bool = True,
         log_max_bytes: int = 8 * 1024 * 1024,
+        verdict_wait_s: float = 3600.0,
     ) -> None:
         self.adapter = adapter
         self.base_dir = base_dir
         self.user = user
         self.interval_s = max(5.0, interval_s)
         self.refresh_s = refresh_s
+        #: how long to keep asking accounting for the verdict of a job that ended as UNKNOWN_ENDED
+        self.verdict_wait_s = verdict_wait_s
         self.now = now
         self.host = (host or socket.gethostname().split(".")[0]).translate(_SANITISE)
         self.cluster = (cluster or adapter.cluster_name() or adapter.name).translate(_SANITISE)
@@ -143,7 +146,7 @@ class SchedulerProbe:
 
     def emit(self, job: JobInfo, change: str) -> Dict[str, Any]:
         data = job.to_data()
-        data["change"] = change  # first_seen | state | detail | refresh | ended
+        data["change"] = change  # first_seen | state | detail | refresh | ended | verdict
         data["probe"] = {"host": self.host, "poll_ts": self.now(), "scheduler": self.adapter.name}
         return self.emit_raw(self.run_id_for(job), "scheduler.state", data)
 
@@ -198,12 +201,15 @@ class SchedulerProbe:
                 "job_name": job.job_name, "first_seen_ts": (rec or {}).get("first_seen_ts", now),
                 "last_seen_ts": now, "last_emit_ts": last_emit, "ended": False,
             }
-        # jobs that left the queue
+        # jobs that left the queue, and those that left it before accounting could tell how
+        # they ended (sacct down or lagging): keep asking, a late verdict corrects UNKNOWN_ENDED
         gone = [jid for jid, rec in known.items() if jid not in seen_ids and not rec.get("ended")]
-        if gone:
-            since = min(known[j].get("first_seen_ts", now) for j in gone)
+        pending = [jid for jid, rec in known.items() if jid not in seen_ids and rec.get("ended") and rec.get("verdict_pending")]
+        if gone or pending:
+            lookup = gone + pending
+            since = min(known[j].get("first_seen_ts", now) for j in lookup)
             try:
-                final = self.adapter.finished(gone, since, self.user)
+                final = self.adapter.finished(lookup, since, self.user)
             except Exception as e:
                 dbg(f"finished lookup failed: {e}")
                 final = {}
@@ -215,16 +221,23 @@ class SchedulerProbe:
                         continue  # accounting may lag a little behind the queue
                     job = JobInfo(scheduler=self.adapter.name, job_id=jid, job_key=rec.get("job_key", jid),
                                   state="UNKNOWN_ENDED", job_name=rec.get("job_name"), restarts=rec.get("restarts", 0),
-                                  extra={"note": "left the queue; accounting unavailable"})
-                job.restarts = rec.get("restarts", 0) if not job.restarts else job.restarts
-                job.job_key = rec.get("job_key") or job.job_key
-                for f in ("stdout", "stderr", "workdir", "command", "job_name"):
-                    if getattr(job, f) is None and rec.get(f):
-                        setattr(job, f, rec[f])
+                                  extra={"note": "left the queue; accounting unavailable for now"})
+                self._complete_from_record(job, rec)
                 emitted.append(self.emit(job, "ended"))
-                rec.update(ended=True, state=job.state, last_emit_ts=now, ended_ts=now)
+                rec.update(ended=True, state=job.state, last_emit_ts=now, ended_ts=now,
+                           verdict_pending=job.state == "UNKNOWN_ENDED")
                 if self.tailer:
                     self.tailer.track(self.run_id_for(job), job.stdout, job.stderr, now)
+            for jid in pending:
+                rec = known[jid]
+                job = final.get(jid)
+                if job is None:
+                    if now - rec.get("ended_ts", now) > self.verdict_wait_s:
+                        rec["verdict_pending"] = False  # give up: UNKNOWN_ENDED stands
+                    continue
+                self._complete_from_record(job, rec)
+                emitted.append(self.emit(job, "verdict"))
+                rec.update(state=job.state, last_emit_ts=now, verdict_pending=False)
         if self.tailer:
             self.log_chunks += self.tailer.poll(self.emit_raw)
         # forget finished jobs after a day
@@ -235,6 +248,15 @@ class SchedulerProbe:
         self._save_state()
         self._write_heartbeat({"ok": True, "queued": len(jobs), "emitted_this_poll": len(emitted)})
         return emitted
+
+    @staticmethod
+    def _complete_from_record(job: JobInfo, rec: Dict[str, Any]) -> None:
+        """Accounting forgets what only ``scontrol`` knew while the job was alive: put it back."""
+        job.restarts = rec.get("restarts", 0) if not job.restarts else job.restarts
+        job.job_key = rec.get("job_key") or job.job_key
+        for f in ("stdout", "stderr", "workdir", "command", "job_name"):
+            if getattr(job, f) is None and rec.get(f):
+                setattr(job, f, rec[f])
 
     def run_forever(self) -> None:
         def stop(signum, frame):  # type: ignore[no-untyped-def]

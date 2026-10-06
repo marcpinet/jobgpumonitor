@@ -108,14 +108,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     if pusher:
         pusher.start()
 
+    received: Dict[int, str] = {}
     forwarded: Dict[int, str] = {}
+    do_forward = _forward_signals(args, ctx["job"])
 
     def forward(signum: int, frame: Any) -> None:
         name = signal.Signals(signum).name
-        forwarded[signum] = name
-        run.emit("signal.received", {"signal": name, "signum": signum, "forwarded": not args.no_forward,
+        received[signum] = name
+        run.emit("signal.received", {"signal": name, "signum": signum, "forwarded": do_forward,
                                      "deadline_remaining_s": run.deadline_remaining_s()})
-        if not args.no_forward and child.poll() is None:
+        if do_forward and child.poll() is None:
+            forwarded[signum] = name
             try:
                 os.kill(child.pid, signum)
             except OSError:
@@ -154,6 +157,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         signal=sig_name,
         command=cmd,
         stderr_tail="\n".join(tail)[-16000:],
+        received_signals=sorted(received.values()),
         forwarded_signals=sorted(forwarded.values()),
     )
     run.close(3.0)
@@ -164,24 +168,36 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 class _ChunkEmitter:
-    """Batches the child's stdout/stderr into ``log.chunk`` events (every 2 s or 64 KB)."""
+    """Batches the child's stdout/stderr into ``log.chunk`` events (every 2 s or 64 KB).
 
-    def __init__(self, run: Run, max_bytes: int = 8 * 1024 * 1024) -> None:
+    Carriage-return redraws (tqdm) are folded before they count against ``max_bytes`` per
+    stream. Past that budget only the last ``tail_bytes`` are kept, and sent when the
+    command ends: when a long job dies, its last lines matter more than its first ones."""
+
+    def __init__(self, run: Run, max_bytes: int = 8 * 1024 * 1024, tail_bytes: int = 64 * 1024) -> None:
         self.run = run
         self.max_bytes = max_bytes
+        self.tail_bytes = tail_bytes
         self._lock = threading.Lock()
         self._buf: Dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
-        self._offset: Dict[str, int] = {"stdout": 0, "stderr": 0}
+        self._offset: Dict[str, int] = {"stdout": 0, "stderr": 0}   # stream offset of _buf[0]
+        self._sent: Dict[str, int] = {"stdout": 0, "stderr": 0}     # bytes emitted, after folding
+        self._skipped: Dict[str, int] = {"stdout": 0, "stderr": 0}  # dropped since the last chunk
         self._done: Dict[str, bool] = {}
-        self._truncated: Dict[str, bool] = {}
         self._last = time.monotonic()
 
     def feed(self, stream: str, data: bytes) -> None:
         with self._lock:
-            if self._truncated.get(stream):
+            buf = self._buf[stream]
+            buf += data
+            if self._sent[stream] >= self.max_bytes:  # over budget: keep a rolling tail only
+                extra = len(buf) - self.tail_bytes
+                if extra > 0:
+                    del buf[:extra]
+                    self._offset[stream] += extra
+                    self._skipped[stream] += extra
                 return
-            self._buf[stream] += data
-            due = len(self._buf[stream]) >= 65536 or time.monotonic() - self._last >= 2.0
+            due = len(buf) >= 65536 or time.monotonic() - self._last >= 2.0
         if due:
             self.flush()
 
@@ -190,11 +206,17 @@ class _ChunkEmitter:
             self._done[stream] = True
 
     def flush(self, final: bool = False) -> None:
+        from .scheduler.logtail import fold_redraws
+
         with self._lock:
             self._last = time.monotonic()
             for stream in ("stdout", "stderr"):
                 buf = self._buf[stream]
-                if not buf and not (final and self._done.get(stream)):
+                eof = bool(final and self._done.get(stream))
+                over = self._sent[stream] >= self.max_bytes
+                if over and not final:
+                    continue  # the tail waits for the end
+                if not buf and not eof:
                     continue
                 data = bytes(buf)
                 if not final:
@@ -202,53 +224,212 @@ class _ChunkEmitter:
                     if cut <= 0:
                         continue
                     data = data[:cut]
-                del buf[: len(data)]
-                offset = self._offset[stream]
-                if offset + len(data) > self.max_bytes:
-                    data = data[: max(0, self.max_bytes - offset)]
-                    self._truncated[stream] = True
-                self._offset[stream] += len(data)
-                self.run.emit("log.chunk", {
+                consumed = len(data)
+                skipped = self._skipped[stream]
+                if skipped:  # resume on a whole line
+                    nl = data.find(b"\n")
+                    if 0 <= nl < len(data) - 1:
+                        data = data[nl + 1:]
+                        skipped += nl + 1
+                del buf[:consumed]
+                offset = self._offset[stream] + consumed - len(data)
+                self._offset[stream] += consumed
+                self._skipped[stream] = 0
+                text = fold_redraws(data)
+                self._sent[stream] += len(text)
+                chunk: Dict[str, Any] = {
                     "stream": stream, "path": f"<{stream}>", "offset": offset,
-                    "text": data.decode("utf-8", "replace"), "size": self._offset[stream],
-                    "truncated": bool(self._truncated.get(stream)), "eof": bool(final and self._done.get(stream)),
-                })
+                    "text": text.decode("utf-8", "replace"), "size": self._offset[stream],
+                    "truncated": over or skipped > 0, "eof": eof,
+                }
+                if skipped:
+                    chunk["skipped"] = skipped
+                self.run.emit("log.chunk", chunk)
+
+
+class _PushLock:
+    """One pusher per run directory: ``srun -n 8 jgm run ...`` starts 8 wrappers sharing it.
+
+    A lock file created with ``O_EXCL`` and refreshed at every push; a lock left stale for
+    ``stale_s`` (its holder was killed) is taken over. Two contenders may both believe they
+    won for one cycle; the holder re-reads the owner at each refresh and steps back."""
+
+    def __init__(self, run_dir: str, stale_s: float) -> None:
+        import socket
+
+        self.path = os.path.join(run_dir, ".push.lock")
+        self.stale_s = stale_s
+        self.owner = f"{socket.gethostname()}:{os.getpid()}"
+        self.held = False
+
+    def _holder(self) -> List[str]:
+        """``[owner]`` or ``[owner, "final"]`` as written in the lock file ([] if none)."""
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                return f.read().split()
+        except OSError:
+            return []
+
+    def holder_finishing(self) -> bool:
+        """The holder is doing its last push and may have read our file before our last events."""
+        return self._holder()[1:2] == ["final"]
+
+    def mark_final(self) -> None:
+        if self.held:
+            tmp = f"{self.path}.{os.getpid()}.tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(f"{self.owner} final")
+                os.replace(tmp, self.path)  # readers never see an empty lock
+            except OSError:
+                pass
+
+    def acquire(self) -> bool:
+        if self.held:
+            holder = self._holder()
+            if holder[:1] == [self.owner]:
+                try:
+                    os.utime(self.path)
+                    return True
+                except OSError:
+                    pass
+            self.held = False  # taken over or removed under us: compete again
+            if holder:
+                return False
+        if self._create():
+            return True
+        try:
+            age = time.time() - os.stat(self.path).st_mtime
+        except FileNotFoundError:
+            return self._create()
+        except OSError:
+            return False
+        if age <= self.stale_s:
+            return False
+        stale = f"{self.path}.{os.getpid()}.stale"
+        try:
+            os.rename(self.path, stale)  # atomic: one contender gets it
+        except OSError:
+            return False
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
+        return self._create()
+
+    def _create(self) -> bool:
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except OSError:
+            return False
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(self.owner)
+        self.held = True
+        return True
+
+    def release(self) -> None:
+        if not self.held:
+            return
+        self.held = False
+        if self._holder()[:1] == [self.owner]:
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
 
 
 class _RunPusher(threading.Thread):
-    """Ships this run's directory to the configured server every few seconds, and once more at exit."""
+    """Ships this run's directory to the configured server every few seconds, and once more at exit.
 
-    def __init__(self, run: Run, interval_s: float = 10.0) -> None:
+    Only one wrapper per run directory pushes (``_PushLock``); its offsets live next to the
+    events (``.push-state.json``) so that another wrapper of the job resumes where it stopped.
+    In-job pushes use short timeouts and back off while the server is unreachable: a node
+    without a route to the server must not slow the job down, nor its exit."""
+
+    def __init__(self, run: Run, interval_s: float = 10.0, max_backoff_s: float = 300.0) -> None:
         super().__init__(name="jgm-push", daemon=True)
+        from .runtime import PUSH_TIMEOUT_S
+
         self.jrun = run
         self.interval_s = interval_s
+        self.max_backoff_s = max_backoff_s
         self._halt = threading.Event()
+        self._mutex = threading.Lock()  # the periodic push and the final one never overlap
+        self.reached = False  # the server answered at least once
+        self.failed_last = False
         self.fw = None
+        self.plock: Optional[_PushLock] = None
         remote = _remote_for(run)
         if remote and run.base_dir and run.run_dir:
             from .forward import Forwarder
 
-            self.fw = Forwarder(run.base_dir, remote[0], remote[1], only_dir=run.run_dir, persist=False)
+            self.fw = Forwarder(run.base_dir, remote[0], remote[1], only_dir=run.run_dir, timeout=PUSH_TIMEOUT_S,
+                                state_path=os.path.join(run.run_dir, ".push-state.json"))
+            self.plock = _PushLock(run.run_dir, stale_s=max(60.0, 6 * interval_s))
 
-    def run_once(self) -> None:
-        if self.fw is None:
-            return
-        try:
-            self.jrun.flush(2.0)
-            self.fw.cycle()
-        except Exception as e:  # never disturb the job
-            dbg(f"push failed: {e}")
+    def run_once(self, deadline: Optional[float] = None, final: bool = False) -> Optional[bool]:
+        """One push if this wrapper holds the lock: True if shipped, False if the server could
+        not be reached, None if another wrapper of this job holds the lock."""
+        if self.fw is None or self.plock is None:
+            return True
+        with self._mutex:
+            try:
+                was_held = self.plock.held
+                if not self.plock.acquire():
+                    return None
+                if not was_held:
+                    self.fw.reload()
+                if final:
+                    self.plock.mark_final()
+                self.jrun.flush(2.0)
+                ok = bool(self.fw.cycle(deadline=deadline).get("ok"))
+            except Exception as e:  # never disturb the job
+                dbg(f"push failed: {e}")
+                ok = False
+            self.reached = self.reached or ok
+            self.failed_last = not ok
+            return ok
 
     def run(self) -> None:  # noqa: D102
         if self.fw is None:
             return
-        while not self._halt.wait(self.interval_s):
-            self.run_once()
+        delay = self.interval_s
+        while not self._halt.wait(delay):
+            delay = self.interval_s if self.run_once() is not False else min(delay * 2, self.max_backoff_s)
 
     def stop(self) -> None:
+        """Last push. If another wrapper holds the lock and is still running, it ships our last
+        events at its next push; if it is doing its own last push, it may have read our file
+        too early: wait for it to finish (within the budget) and ship the rest ourselves."""
+        from .runtime import PUSH_BUDGET_S, PUSH_TIMEOUT_S
+
         self._halt.set()
-        self.join(2.0)
-        self.run_once()
+        self.join(PUSH_TIMEOUT_S + 1.0)
+        if self.plock is None:
+            return
+        if self.failed_last and not self.reached:
+            # never reached the server from this node: do not hold the exit for another timeout
+            self.plock.release()
+            return
+        deadline = time.monotonic() + PUSH_BUDGET_S
+        while self.run_once(deadline=deadline, final=True) is None:
+            if not self.plock.holder_finishing() or time.monotonic() >= deadline:
+                break
+            time.sleep(0.2)
+        self.plock.release()
+
+
+def _forward_signals(args: argparse.Namespace, job: Dict[str, Any]) -> bool:
+    """Whether the wrapper relays the signals it receives to the command.
+
+    Slurm delivers ``scancel``, time-limit and ``--signal`` signals to every process of the
+    step: the command already got the signal, relaying it would deliver it twice (and a
+    program that checkpoints on the first SIGTERM and quits on the second would quit at
+    once). Elsewhere (no scheduler, a plain ``kill`` of the wrapper) relaying is needed."""
+    mode = "never" if args.no_forward else args.forward_signals
+    if mode in ("always", "never"):
+        return mode == "always"
+    return job.get("name") != "slurm"
 
 
 def _remote_for(run: Run):  # type: ignore[no-untyped-def]
@@ -684,7 +865,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--name", help="human name for the run (defaults to the scheduler job name)")
     r.add_argument("--cwd", help="working directory for the command")
     r.add_argument("--tail-lines", type=int, default=100, help="stderr lines kept for run.end")
-    r.add_argument("--no-forward", action="store_true", help="do not forward signals to the child")
+    r.add_argument("--forward-signals", choices=["auto", "always", "never"], default="auto",
+                   help="relay the signals the wrapper receives to the command; auto (default): not under Slurm, "
+                        "which already signals every process of the step; use always with `exec jgm run` and --signal=B:...")
+    r.add_argument("--no-forward", action="store_true", help="same as --forward-signals never")
     r.add_argument("--no-auto", action="store_true", help="do not auto-instrument the Python processes the command starts")
     r.add_argument("--no-push", action="store_true", help="do not ship events to the configured server from the job")
     r.add_argument("--keep-buffering", action="store_true", help="do not set PYTHONUNBUFFERED=1 for the command")

@@ -71,7 +71,10 @@ threads, children, children_rss, open_fds), `cgroup` (mem_used, mem_limit, mem_p
 mem_pct, events_oom_kill), `disk` (cwd total/free), `load`.
 
 ### `progress.update`
-One per tqdm refresh, throttled to `JGM_PROGRESS_S` (default 1 s) per bar: `bar_id`, `desc`,
+On tqdm refreshes, throttled per bar to one every `JGM_PROGRESS_S` (default 1 s) during the
+first `JGM_PROGRESS_SLOW_AFTER_S` (60 s) of the run, then one every `JGM_PROGRESS_SLOW_S`
+(15 s); the first refresh of a new bar and its end are always emitted (heartbeats carry the
+latest state of every bar in between): `bar_id`, `desc`,
 `n`, `total`, `unit`, `rate`, `elapsed_s`, `eta_s`, `done`, and when a deadline is known
 `deadline_remaining_s` and `eta_vs_deadline_s` (negative: will not finish in time).
 
@@ -97,7 +100,8 @@ file, line, func, code, optional masked `locals`), `is_oom`, `fatal`, `thread`, 
 from inside the process, authoritative from `jgm run`), `duration_s`, `end_ts`,
 `exception` (short form), `metrics`, `progress`, `summary` (gpu util mean and idle
 fraction, gpu mem max, rss max, cgroup mem max, cpu mean), `dropped`; from `jgm run` also
-`signal`, `stderr_tail`, `command`, `forwarded_signals`.
+`signal`, `stderr_tail`, `command`, `received_signals`, `forwarded_signals` (relayed to the
+command: not under Slurm by default, which signals every process of the step itself).
 
 ### `custom.*`
 `jobgpumonitor.emit("stage", name="eval")` or `jgm emit stage name=eval`.
@@ -106,7 +110,8 @@ fraction, gpu mem max, rss max, cgroup mem max, cpu mean), `dropped`; from `jgm 
 Emitted by the login-node probe (`jgm scheduler`), `source: scheduler`, into the same run
 directory as the process events (`scheduler-<host>.jsonl`). One event per change:
 `change` is `first_seen`, `state`, `detail`, `refresh` (unchanged running job, every
-`--refresh` seconds) or `ended`. Fields: `state` (normalised across schedulers), `terminal`,
+`--refresh` seconds), `ended`, or `verdict` (the real terminal state of a job that ended as
+`UNKNOWN_ENDED`, once accounting answers; the probe keeps asking for an hour). Fields: `state` (normalised across schedulers), `terminal`,
 `active`, `state_reason` with `extra.reason_hint` for pending jobs, `job_name`, `partition`,
 `qos`, `nodes`, `gres`, `mem`, `submit_ts`/`start_ts`/`end_ts`, `time_limit_s`, `restarts`,
 `exit_code`/`exit_signal`, `stdout`/`stderr`/`workdir`/`command` (captured from `scontrol`
@@ -121,10 +126,20 @@ tell whether the probe itself is alive.
 
 ### `log.chunk`
 Emitted by the login-node probe when it can see the job's `.out` / `.err` files (paths from
-`scontrol`): `stream` (`stdout` or `stderr`), `path`, `offset` (bytes), `text`, `size`,
-`truncated` (per-file cap reached, default 8 MB, nothing more is sent), `eof` (job ended
-and the file is fully sent). Chunks end on a line boundary while the job runs. A consumer
-appends the chunks of a stream in `offset` order to show the log live.
+`scontrol`), and by `jgm run` for the command's stdout / stderr (`path` is then `<stdout>` /
+`<stderr>`): `stream` (`stdout` or `stderr`), `path`, `offset` (bytes into the stream),
+`text`, `size`, `truncated`, `skipped`, `eof` (job ended and the stream is fully sent).
+Chunks end on a line boundary while the job runs. A consumer appends the chunks of a stream
+in `offset` order to show the log live.
+
+`text` has carriage-return redraws folded (tqdm): only the last state of each line is kept,
+and a line still being drawn at the end of a chunk keeps its trailing `\r`, so a consumer
+that folds again across chunks shows what a terminal would. `offset` and `size` count the
+raw bytes of the stream.
+
+At most 8 MB of (folded) text per stream is sent while the job runs. Past that, nothing is
+sent until the job ends, then its last 64 KB: that chunk has `skipped` (bytes jumped over
+before it) and `truncated: true`. How a job ended matters more than how it started.
 
 ### Reserved for later
 `checkpoint.saved`, `stack.dump`.

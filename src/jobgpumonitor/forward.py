@@ -48,19 +48,25 @@ class Forwarder:
         host: Optional[str] = None,
         only_dir: Optional[str] = None,
         persist: bool = True,
+        only_files: Optional[List[str]] = None,
+        state_path: Optional[str] = None,
+        timeout: float = 30.0,
     ) -> None:
         self.base_dir = base_dir
-        #: ship this run directory only (the wrapper inside a job), offsets kept in memory
+        #: ship this run directory only (the wrapper inside a job)
         self.only_dir = only_dir
+        #: ship these files only (a process shipping its own events at exit)
+        self.only_files = only_files
         self.persist = persist
         self.url = url
         self.token = token
         self.batch_events = batch_events
         self.batch_bytes = batch_bytes
         self.max_line = max_line
-        self.post = post or (lambda body, headers: http_post(self.url, body, headers))
+        self.timeout = timeout
+        self.post = post or (lambda body, headers: http_post(self.url, body, headers, timeout=self.timeout))
         self.host = host or socket.gethostname().split(".")[0]
-        self.state_path = os.path.join(base_dir, "forward", "state.json")
+        self.state_path = state_path or os.path.join(base_dir, "forward", "state.json")
         self.offsets: Dict[str, Dict[str, Any]] = {}
         self.sent = 0
         self.failures = 0
@@ -80,12 +86,16 @@ class Forwarder:
         except (OSError, ValueError):
             pass
 
+    def reload(self) -> None:
+        """Take over the offsets another process saved (a wrapper taking the push over)."""
+        self._load()
+
     def _save(self) -> None:
         if not self.persist:
             return
         try:
             os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
-            tmp = self.state_path + ".tmp"
+            tmp = f"{self.state_path}.{os.getpid()}.tmp"  # several wrappers may share a state file
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({"offsets": self.offsets, "sent": self.sent, "last_ok_ts": self.last_ok_ts, "host": self.host}, f)
             os.replace(tmp, self.state_path)
@@ -95,28 +105,30 @@ class Forwarder:
     # ------------------------------------------------------------------ reading
 
     def files(self) -> List[str]:
+        if self.only_files is not None:
+            return [p for p in self.only_files if os.path.isfile(p)]
         if self.only_dir:
             return sorted(glob.glob(os.path.join(self.only_dir, "*.jsonl")))
         return sorted(glob.glob(os.path.join(self.base_dir, "runs", "*", "*", "*", "*.jsonl")))
 
-    def _read_new(self, path: str) -> Tuple[List[Dict[str, Any]], int, int]:
-        """New complete lines of one file -> (events, consumed_bytes, start_offset)."""
+    def _read_new(self, path: str) -> Tuple[List[Dict[str, Any]], int, int, bool]:
+        """New complete lines of one file -> (events, consumed_bytes, start_offset, read_to_end)."""
         try:
             st = os.stat(path)
         except OSError:
-            return [], 0, 0
+            return [], 0, 0, True
         rec = self.offsets.get(path) or {}
         offset = int(rec.get("offset", 0))
         if rec.get("inode") not in (None, st.st_ino) or st.st_size < offset:
             offset = 0
         if st.st_size == offset:
-            return [], 0, offset
+            return [], 0, offset, True
         try:
             with open(path, "rb") as f:
                 f.seek(offset)
                 chunk = f.read(min(st.st_size - offset, self.batch_bytes))
         except OSError:
-            return [], 0, offset
+            return [], 0, offset, True
         lines = chunk.split(b"\n")
         tail = lines.pop()
         consumed = len(chunk) - len(tail)
@@ -134,7 +146,7 @@ class Forwarder:
             if isinstance(ev, dict) and ev.get("run_id") and ev.get("emitter") and ev.get("type"):
                 events.append(ev)
         self.offsets[path] = {"offset": offset, "inode": st.st_ino, "size": st.st_size}
-        return events, consumed, offset
+        return events, consumed, offset, offset + len(chunk) >= st.st_size
 
     # ------------------------------------------------------------------ sending
 
@@ -161,13 +173,17 @@ class Forwarder:
         self.last_ok_ts = time.time()
         return True
 
-    def cycle(self) -> Dict[str, int]:
-        """Ship what is new. Returns counters. Stops at the first failed batch (offsets untouched)."""
+    def cycle(self, deadline: Optional[float] = None) -> Dict[str, int]:
+        """Ship what is new. Returns counters. Stops at the first failed batch (offsets untouched),
+        and, with ``deadline`` (``time.monotonic()`` value), before a batch that would start later."""
         shipped = 0
         batches = 0
         for path in self.files():
             while True:
-                events, consumed, offset = self._read_new(path)
+                if deadline is not None and time.monotonic() >= deadline:
+                    self._save()
+                    return {"shipped": shipped, "batches": batches, "ok": 1, "complete": 0}
+                events, consumed, offset, at_end = self._read_new(path)
                 if not events and consumed == 0:
                     break
                 if events:
@@ -181,10 +197,10 @@ class Forwarder:
                         batches += 1
                 self.offsets[path]["offset"] = offset + consumed
                 self.sent += len(events)
-                if consumed < self.batch_bytes:
+                if at_end:
                     break  # file fully read for now
         self._save()
-        return {"shipped": shipped, "batches": batches, "ok": 1}
+        return {"shipped": shipped, "batches": batches, "ok": 1, "complete": 1}
 
     def run_forever(self, interval_s: float, stop=None) -> None:  # type: ignore[no-untyped-def]
         import threading

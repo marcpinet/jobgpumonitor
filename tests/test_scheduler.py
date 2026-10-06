@@ -230,15 +230,75 @@ def test_probe_tails_stdout_and_stderr_of_running_jobs(tmp_path):
     assert len(read_events(str(tmp_path))) == n
 
 
-def test_probe_log_size_cap(tmp_path):
+def test_probe_log_size_cap_keeps_the_end(tmp_path):
+    """Past the budget nothing is sent while the job runs; when it ends, its last lines are."""
     out = tmp_path / "big.out"
-    out.write_text("x" * 5000 + "\n")
+    out.write_bytes(b"x" * 5000 + b"\n")
     scontrol = SCONTROL.replace("StdOut=/home/k/jgm-smoke_8224458.out", f"StdOut={out}").replace("StdErr=/home/k/jgm-smoke_8224458.err", f"StdErr={out}")
-    fake = FakeSlurm([SQUEUE_RUNNING], scontrol=scontrol)
-    probe = SchedulerProbe(SlurmAdapter(fake), str(tmp_path), user=None, interval_s=30, host="l", log_max_bytes=3000)
+    fake = FakeSlurm([SQUEUE_RUNNING, SQUEUE_RUNNING, ""], sacct=SACCT_OOM, scontrol=scontrol)
+    clock = [6_000_000.0]
+    probe = SchedulerProbe(SlurmAdapter(fake), str(tmp_path), user=None, interval_s=30, host="l", log_max_bytes=3000, now=lambda: clock[0])
+    probe.tailer.tail_bytes = 2000
     probe.poll()
+    with open(out, "ab") as f:
+        f.write(b"".join(b"step %d\n" % i for i in range(1000)) + b"Traceback (most recent call last):\nMemoryError\n")
+    clock[0] += 30
     probe.poll()
     chunks = [e["data"] for e in read_events(str(tmp_path)) if e["type"] == "log.chunk"]
-    assert chunks[0]["truncated"] is False and len(chunks[0]["text"]) == 3000
-    assert chunks[1]["truncated"] is True and chunks[1]["text"] == ""
-    assert len(chunks) == 2  # dropped afterwards
+    assert len(chunks) == 1 and chunks[0]["truncated"] is False and len(chunks[0]["text"]) == 3000
+    clock[0] += 30
+    probe.poll()  # gone from the queue -> ended: the tail is sent
+    chunks = [e["data"] for e in read_events(str(tmp_path)) if e["type"] == "log.chunk"]
+    assert len(chunks) == 2
+    tail = chunks[1]
+    assert tail["truncated"] is True and tail["eof"] is True and tail["skipped"] > 0
+    assert tail["text"].endswith("Traceback (most recent call last):\nMemoryError\n") and tail["text"].startswith("step ")
+    assert tail["offset"] == 3000 + tail["skipped"] and len(tail["text"]) <= 2000
+
+
+def test_sacct_outage_is_retried_and_a_late_verdict_corrects_unknown(tmp_path):
+    fake = FakeSlurm([SQUEUE_RUNNING, "", "", "", "", "", ""], sacct=None)
+    clock = [7_000_000.0]
+    probe = SchedulerProbe(SlurmAdapter(fake, clock=lambda: clock[0]), str(tmp_path), user=None, interval_s=30, host="l",
+                           now=lambda: clock[0])
+    probe.poll()  # running
+    clock[0] += 30
+    assert probe.poll() == []  # gone, sacct down: accounting may lag
+    clock[0] += 60
+    e = probe.poll()
+    assert [x["data"]["state"] for x in e] == ["UNKNOWN_ENDED"]
+    fake.sacct = SACCT_OOM  # slurmdbd is back...
+    clock[0] += 30
+    assert probe.poll() == []  # ...the adapter waits SACCT_RETRY_S after a failure, it does not give up for good
+    clock[0] += SlurmAdapter.SACCT_RETRY_S
+    e = probe.poll()
+    assert len(e) == 1 and e[0]["data"]["change"] == "verdict" and e[0]["data"]["state"] == "OUT_OF_MEMORY"
+    assert e[0]["run_id"] == "marcel-c3/8224458/0" and e[0]["data"]["stdout"] == "/home/k/jgm-smoke_8224458.out"
+    asked = sum(1 for c in fake.calls if c[0] == "sacct")
+    clock[0] += 30
+    assert probe.poll() == [] and sum(1 for c in fake.calls if c[0] == "sacct") == asked  # settled
+
+
+def test_unknown_end_gives_up_after_verdict_wait(tmp_path):
+    fake = FakeSlurm([SQUEUE_RUNNING, "", "", ""], sacct=None)
+    clock = [8_000_000.0]
+    probe = SchedulerProbe(SlurmAdapter(fake, clock=lambda: clock[0]), str(tmp_path), user=None, interval_s=30, host="l",
+                           now=lambda: clock[0], verdict_wait_s=600)
+    probe.poll()
+    clock[0] += 90
+    probe.poll()
+    assert probe.state["jobs"]["8224458"]["verdict_pending"] is True
+    clock[0] += 601
+    probe.poll()
+    assert probe.state["jobs"]["8224458"]["verdict_pending"] is False
+
+
+def test_probe_folds_progress_bar_redraws(tmp_path):
+    out = tmp_path / "job.out"
+    out.write_bytes(b"start\n" + b"".join(b"\rtrain %3d%%" % i for i in range(101)) + b"\ndone\n")
+    scontrol = SCONTROL.replace("StdOut=/home/k/jgm-smoke_8224458.out", f"StdOut={out}").replace("StdErr=/home/k/jgm-smoke_8224458.err", f"StdErr={out}")
+    probe = SchedulerProbe(SlurmAdapter(FakeSlurm([SQUEUE_RUNNING], scontrol=scontrol)), str(tmp_path), user=None, interval_s=30, host="l")
+    probe.poll()
+    chunks = [e["data"] for e in read_events(str(tmp_path)) if e["type"] == "log.chunk"]
+    assert [c["text"] for c in chunks] == ["start\ntrain 100%\ndone\n"]
+    assert chunks[0]["offset"] == 0 and probe.tailer.state["marcel-c3/8224458/0"]["stdout"]["sent"] == len("start\ntrain 100%\ndone\n")

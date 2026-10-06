@@ -10,7 +10,7 @@ import subprocess
 import sys
 import threading
 
-from conftest import first, last
+from conftest import first, last, posix_only
 from jobgpumonitor import remote
 
 
@@ -42,6 +42,7 @@ def _server():
     return srv, f"http://127.0.0.1:{srv.server_port}/ingest"
 
 
+@posix_only
 def test_remote_config_env_then_file(tmp_path, monkeypatch):
     monkeypatch.delenv("JGM_FORWARD_URL", raising=False)
     monkeypatch.delenv("JGM_FORWARD_TOKEN", raising=False)
@@ -104,6 +105,7 @@ def test_wrapper_without_server_still_writes_files(tmp_path, runner):
     assert any(e["type"] == "log.chunk" and e["data"]["stream"] == "stdout" and e["data"]["text"] == "x\n" for e in ev)
 
 
+@posix_only
 def test_agent_pid_and_keepalive(tmp_path, monkeypatch):
     from jobgpumonitor import agent
 
@@ -129,6 +131,7 @@ def test_agent_pid_and_keepalive(tmp_path, monkeypatch):
     assert agent._self_argv() in (["-m", "jobgpumonitor"],) or agent._self_argv()[0].endswith(".pyz")
 
 
+@posix_only
 def test_agent_start_status_stop(runner, tmp_path):
     srv, url = _server()
     env = dict(runner.env, JGM_FORWARD_URL=url, JGM_FORWARD_TOKEN="w", PATH=str(tmp_path / "nobin"))  # no crontab, no squeue
@@ -158,3 +161,61 @@ def test_agent_start_reports_immediate_death(runner, monkeypatch):
         agent.start_detached(base, ["--this-flag-does-not-exist"], settle_s=10.0)
     assert agent.running_pid(base) is None
     assert "unrecognized arguments" in (runner.dir / "agent" / "agent.log").read_text()
+
+
+def test_two_wrappers_of_one_job_push_each_event_once(tmp_path, runner):
+    """``srun -n 2 jgm run ...``: one wrapper at a time pushes the run directory, nothing twice."""
+    srv, url = _server()
+    _Ingest.received.clear()
+    remote.save(str(runner.dir), url, "w")
+    prog = tmp_path / "prog.py"
+    prog.write_text("import time\nfor i in range(3):\n    print('line', i, flush=True)\n    time.sleep(0.3)\n")
+    procs = [subprocess.Popen([sys.executable, "-m", "jobgpumonitor", "run", "--", sys.executable, str(prog)],
+                              env=dict(runner.env, SLURM_PROCID=str(r), SLURM_NTASKS="2"),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) for r in range(2)]
+    for p in procs:
+        p.communicate(timeout=120)
+        assert p.returncode == 0
+    srv.shutdown()
+    keys = [(e["emitter"], e["pid"], e["seq"]) for e in _Ingest.received]
+    assert len(keys) == len(set(keys)), "an event was pushed twice"
+    assert set(keys) == {(e["emitter"], e["pid"], e["seq"]) for e in runner.events()}  # and all of them
+    assert {e["emitter"].split("-")[1] for e in _Ingest.received if e["source"] == "wrapper"} == {"r0", "r1"}
+    assert not (runner.dir / "runs" / "test" / "42" / "0" / ".push.lock").exists()
+
+
+def test_unwrapped_processes_push_only_their_own_file(runner):
+    srv, url = _server()
+    _Ingest.received.clear()
+    remote.save(str(runner.dir), url, "w")
+    for i in range(2):  # two programs of one job (or two ranks): same run directory
+        p = subprocess.run([sys.executable, "-c", f"import jobgpumonitor; jobgpumonitor.log(i={i})"],
+                           env=runner.env, capture_output=True, text=True, timeout=60)
+        assert p.returncode == 0, p.stderr
+    srv.shutdown()
+    keys = [(e["emitter"], e["pid"], e["seq"]) for e in _Ingest.received]
+    assert len(keys) == len(set(keys)), "the second process re-sent the first one's file"
+    assert set(keys) == {(e["emitter"], e["pid"], e["seq"]) for e in runner.events()}
+
+
+def test_unresponsive_server_does_not_hold_the_job_exit(tmp_path, runner):
+    """A server that accepts connections but never answers: the in-job push gives up quickly."""
+    import socket
+    import time
+
+    silent = socket.socket()
+    silent.bind(("127.0.0.1", 0))
+    silent.listen(16)  # the kernel completes the handshake, nobody ever replies
+    try:
+        remote.save(str(runner.dir), f"http://127.0.0.1:{silent.getsockname()[1]}/ingest", "w")
+        prog = tmp_path / "prog.py"
+        prog.write_text("print('x')\n")
+        t = time.monotonic()
+        p = subprocess.run([sys.executable, "-m", "jobgpumonitor", "run", "--", sys.executable, str(prog)],
+                           env=runner.env, capture_output=True, text=True, timeout=120)
+        took = time.monotonic() - t
+    finally:
+        silent.close()
+    assert p.returncode == 0
+    assert took < 15, f"exit held {took:.0f}s by the push (was 30 s per request)"
+    assert runner.events(), "events are still written locally"

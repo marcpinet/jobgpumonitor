@@ -4,7 +4,7 @@ import json
 import subprocess
 import sys
 
-from conftest import first, last, read_events
+from conftest import first, last, posix_only, read_events
 
 JGM = [sys.executable, "-m", "jobgpumonitor.cli"]
 
@@ -38,12 +38,13 @@ def test_run_wrapper_and_inner_process_share_run_id(runner):
     assert inner_start["data"]["wrapped"] is True
 
 
+@posix_only
 def test_run_wrapper_signal_kill(runner):
     import signal
     import time
 
     proc = subprocess.Popen(
-        JGM + ["run", "--", sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(30)"],
+        JGM + ["run", "--forward-signals", "always", "--", sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(30)"],
         env=runner.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     assert proc.stdout.readline().strip() == "ready"
@@ -93,7 +94,8 @@ def test_events_validate_against_schema(runner):
 
     schema = json.loads((Path(__file__).resolve().parents[1] / "schema" / "event.schema.json").read_text())
     p = subprocess.run(
-        [sys.executable, "-c", "import logging, jobgpumonitor.auto, time; jobgpumonitor.auto.run.log(l=1); logging.warning('w'); time.sleep(1.2); raise RuntimeError('x')"],
+        # 2.5 s: the first heartbeat (1 s) comes after the first sample, and nvidia-smi alone takes ~0.2 s
+        [sys.executable, "-c", "import logging, jobgpumonitor.auto, time; jobgpumonitor.auto.run.log(l=1); logging.warning('w'); time.sleep(2.5); raise RuntimeError('x')"],
         env=runner.env, capture_output=True, text=True, timeout=60,
     )
     assert p.returncode == 1
@@ -103,3 +105,67 @@ def test_events_validate_against_schema(runner):
     for e in ev:
         errors = list(validator.iter_errors(e))
         assert not errors, (e["type"], [err.message for err in errors])
+
+
+@posix_only
+def test_wrapper_does_not_relay_slurm_signals_twice(runner):
+    """Slurm signals every process of the step: the command must see one SIGTERM, not two."""
+    import os
+    import signal
+    import time
+
+    child = (
+        "import os, signal, sys, time\n"
+        "n = [0]\n"
+        "signal.signal(signal.SIGTERM, lambda s, f: n.__setitem__(0, n[0] + 1))\n"
+        "print(os.getpid(), flush=True)\n"
+        "t = time.time()\n"
+        "while not n[0] and time.time() - t < 20:\n"
+        "    time.sleep(0.05)\n"
+        "time.sleep(1.5)\n"
+        "sys.exit(10 + n[0])\n"
+    )
+    for mode, expected in (("auto", 11), ("always", 12)):
+        proc = subprocess.Popen(JGM + ["run", "--forward-signals", mode, "--", sys.executable, "-c", child],
+                                env=runner.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        pid = int(proc.stdout.readline())
+        time.sleep(0.3)
+        os.kill(pid, signal.SIGTERM)  # what Slurm does: every process of the step...
+        time.sleep(0.3)
+        proc.send_signal(signal.SIGTERM)  # ...the wrapper included
+        proc.wait(timeout=30)
+        assert proc.returncode == expected, (mode, proc.stderr.read())
+        end = last([e for e in runner.events() if e["source"] == "wrapper"], "run.end")["data"]
+        assert end["received_signals"] == ["SIGTERM"]
+        assert end["forwarded_signals"] == ([] if mode == "auto" else ["SIGTERM"])
+
+
+def test_chunk_emitter_folds_redraws_and_keeps_the_tail():
+    from jobgpumonitor.cli import _ChunkEmitter
+
+    class FakeRun:
+        def __init__(self):
+            self.chunks = []
+
+        def emit(self, etype, data):
+            self.chunks.append(data)
+            return True
+
+    r = FakeRun()
+    ce = _ChunkEmitter(r, max_bytes=100, tail_bytes=40)
+    ce.feed("stderr", b"".join(b"\r%3d%%" % i for i in range(100)) + b"\n")  # 501 bytes of redraws
+    ce.flush()
+    assert r.chunks[-1]["text"] == " 99%\n"  # what the terminal shows, 5 bytes of budget
+    ce.feed("stderr", b"".join(b"line %02d\n" % i for i in range(40)))  # crosses the budget
+    ce.flush()
+    n = len(r.chunks)
+    ce.feed("stderr", b"".join(b"more %02d\n" % i for i in range(40)) + b"Traceback\nboom\n")
+    ce.flush()
+    assert len(r.chunks) == n  # over budget: held back until the end
+    ce.close("stdout")
+    ce.close("stderr")
+    ce.flush(final=True)
+    tail = r.chunks[-1]
+    assert tail["stream"] == "stderr" and tail["eof"] and tail["truncated"]
+    assert tail["text"] == "more 37\nmore 38\nmore 39\nTraceback\nboom\n"
+    assert tail["skipped"] == 296 and tail["offset"] == 501 + 320 + 296 and tail["size"] == 501 + 320 + 335

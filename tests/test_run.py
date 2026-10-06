@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from conftest import first, last, types
+from conftest import first, last, posix_only, types
 
 
 def test_normal_run_emits_start_metric_end(runner):
@@ -74,6 +74,7 @@ def test_keyboard_interrupt_status(runner):
     assert end["status"] == "interrupted"
 
 
+@posix_only
 def test_sigterm_default_disposition_emits_killed_and_dies_by_signal(runner):
     proc = runner.popen(
         """
@@ -94,6 +95,7 @@ def test_sigterm_default_disposition_emits_killed_and_dies_by_signal(runner):
     assert end["status"] == "killed" and end["signal"] == "SIGTERM" and end["exit_code"] == 143
 
 
+@posix_only
 def test_sigterm_user_handler_is_chained(runner):
     proc = runner.popen(
         """
@@ -283,6 +285,7 @@ def test_stderr_sink(runner):
     assert runner.events() == []
 
 
+@posix_only
 def test_unwritable_dir_falls_back_to_cwd(runner, tmp_path):
     cwd = tmp_path / "work"
     cwd.mkdir()
@@ -295,3 +298,20 @@ def test_unwritable_dir_falls_back_to_cwd(runner, tmp_path):
     from conftest import read_events
 
     assert read_events(cwd / ".jgm")
+
+
+def test_tqdm_progress_slows_down_after_the_first_minute(runner):
+    pytest.importorskip("tqdm")
+    p = runner.script(
+        """
+        import time, jobgpumonitor.auto
+        from tqdm import tqdm
+        for _ in tqdm(range(40), desc="train", mininterval=0):
+            time.sleep(0.02)
+        """,
+        env={"JGM_PROGRESS_SLOW_AFTER_S": "0", "JGM_PROGRESS_SLOW_S": "100"},
+    )
+    assert p.returncode == 0, p.stderr
+    prog = [e["data"] for e in runner.events() if e["type"] == "progress.update"]
+    assert [(x["n"] == 40, x["done"]) for x in prog][-1] == (True, True)
+    assert len(prog) == 2  # the first refresh of the new bar, then its end: nothing in between

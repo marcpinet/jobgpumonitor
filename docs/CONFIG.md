@@ -13,7 +13,9 @@ Every option is a `JGM_*` environment variable, or a keyword argument to
 | `JGM_SAMPLE_S` | `10` | seconds between `resource.sample` events during the first hour |
 | `JGM_SAMPLE_SLOW_S` | `60` | sampling interval after `JGM_SAMPLE_SLOW_AFTER_S` |
 | `JGM_SAMPLE_SLOW_AFTER_S` | `3600` | when to switch to the slow interval |
-| `JGM_PROGRESS_S` | `1` | minimum interval between two `progress.update` for the same tqdm bar |
+| `JGM_PROGRESS_S` | `1` | minimum interval between two `progress.update` for the same tqdm bar, at first |
+| `JGM_PROGRESS_SLOW_S` | `15` | the same interval after `JGM_PROGRESS_SLOW_AFTER_S` (new and finished bars always emit) |
+| `JGM_PROGRESS_SLOW_AFTER_S` | `60` | when to switch to the slow interval |
 | `JGM_RANK_MODE` | `rank0` | `rank0`: ranks other than 0 emit only start/heartbeat/exception/end; `all`: every rank emits everything; `off`: other ranks emit nothing |
 | `JGM_TQDM` | `1` | hook tqdm |
 | `JGM_LOGGING_LEVEL` | `WARNING` | forward `logging` records at or above this level as `log.line`; empty disables |

@@ -24,10 +24,14 @@ from ._log import dbg, set_debug, warn
 from .config import Config
 from .context import build_context, parse_mem_bytes
 from .probes import CgroupProbe, GpuProbe, ProcessProbe, disk_usage, load_average
-from .sinks import ListSink, Sink, build_sinks, resolve_base_dir, run_dir_for
+from .sinks import FileSink, ListSink, Sink, build_sinks, resolve_base_dir, run_dir_for
 
 #: Event types that ranks other than 0 do not emit in ``rank0`` mode.
 _LIGHT_SUPPRESSED = {"resource.sample", "progress.update", "metric.log", "log.line", "checkpoint.saved"}
+
+#: Pushes from inside a job: per HTTP request, and in total for the last push at exit.
+PUSH_TIMEOUT_S = 5.0
+PUSH_BUDGET_S = 10.0
 
 
 class _Writer(threading.Thread):
@@ -416,8 +420,16 @@ class Run:
                 pass
 
     def _push_at_end(self) -> None:
-        """Not under ``jgm run`` (which ships the whole run directory): ship our own file now."""
-        if self.ctx.get("wrapped") or self.source != "process" or not self.base_dir or not self.run_dir:
+        """Not under ``jgm run`` (which ships the whole run directory): ship our own file now.
+
+        Only our file: every rank of a distributed job does the same with its own. Short
+        timeouts: this runs at exit, possibly from a SIGTERM handler while the scheduler's
+        grace period before SIGKILL is ticking, maybe on a node with no route to the server
+        (the login-node agent, if any, ships the file later anyway)."""
+        if self.ctx.get("wrapped") or self.source != "process" or not self.base_dir:
+            return
+        own = [s.path for s in self.sinks if isinstance(s, FileSink)]
+        if not own:
             return
         try:
             from . import remote
@@ -425,7 +437,8 @@ class Run:
 
             found = remote.load(self.base_dir)
             if found:
-                Forwarder(self.base_dir, found[0], found[1], only_dir=self.run_dir, persist=False).cycle()
+                fw = Forwarder(self.base_dir, found[0], found[1], only_files=own, persist=False, timeout=PUSH_TIMEOUT_S)
+                fw.cycle(deadline=time.monotonic() + PUSH_BUDGET_S)
         except Exception as e:
             dbg(f"push at end failed: {e}")
 

@@ -78,10 +78,14 @@ def _split_scontrol(line: str) -> Dict[str, str]:
 class SlurmAdapter(SchedulerAdapter):
     name = "slurm"
 
-    def __init__(self, run=None) -> None:  # type: ignore[no-untyped-def]
+    #: After a failed ``sacct`` (slurmdbd busy or briefly down), wait this long before the next try.
+    SACCT_RETRY_S = 120.0
+
+    def __init__(self, run=None, clock=time.monotonic) -> None:  # type: ignore[no-untyped-def]
         super().__init__(run) if run is not None else super().__init__()
         self._cluster: Optional[str] = None
-        self._sacct_ok: Optional[bool] = None
+        self._clock = clock
+        self._sacct_retry_at = 0.0
 
     # ------------------------------------------------------------------ cluster
 
@@ -202,7 +206,10 @@ class SlurmAdapter(SchedulerAdapter):
     # ------------------------------------------------------------------ accounting
 
     def finished(self, job_ids: List[str], since_ts: float, user: Optional[str]) -> Dict[str, JobInfo]:
-        if not job_ids or self._sacct_ok is False:
+        if not job_ids:
+            return {}
+        now = self._clock()
+        if now < self._sacct_retry_at:
             return {}
         since = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(since_ts - 3600))
         argv = ["sacct", "-n", "-P", "-S", since, "-j", ",".join(job_ids), "-o", ",".join(_SACCT_FIELDS)]
@@ -210,11 +217,12 @@ class SlurmAdapter(SchedulerAdapter):
             argv += ["-u", user]
         out = self.run(argv)
         if out is None:
-            if self._sacct_ok is None:
-                dbg("sacct unavailable; terminal states will be UNKNOWN_ENDED")
-            self._sacct_ok = False
+            # a timeout or a busy slurmdbd is common and temporary: try again later, the
+            # probe keeps asking for the verdict of the jobs it could not settle
+            dbg(f"sacct failed; next try in {self.SACCT_RETRY_S:.0f}s")
+            self._sacct_retry_at = now + self.SACCT_RETRY_S
             return {}
-        self._sacct_ok = True
+        self._sacct_retry_at = 0.0
         rows: Dict[str, Dict[str, str]] = {}
         steps: Dict[str, List[Dict[str, str]]] = {}
         for line in out.splitlines():

@@ -16,6 +16,10 @@ SRC = ROOT / "src"
 
 BASE_ENV_KEYS_TO_STRIP = ("SLURM_", "OAR_", "PBS_", "LSB_", "JGM_", "RANK", "WORLD_SIZE", "LOCAL_RANK")
 
+#: The emitter targets Linux clusters (and runs on macOS); these tests rely on POSIX signals,
+#: file modes or the login-node tooling (crontab, /proc) and are meaningless on Windows.
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX only: signals, file modes, login-node tooling")
+
 
 def clean_env(**extra: str) -> Dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith(BASE_ENV_KEYS_TO_STRIP)}

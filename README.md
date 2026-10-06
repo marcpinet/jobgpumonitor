@@ -90,6 +90,10 @@ export PYTHONUNBUFFERED=1
 srun jgm run -- python train.py
 ```
 
+Slurm signals every process of the step, so `jgm run` does not relay `scancel` / time-limit
+signals to the command a second time (`--forward-signals always` if you `exec jgm run` in
+the batch script and rely on `--signal=B:...`).
+
 Inside an enroot or Apptainer container, mount the event directory and export `JGM_DIR`:
 
 ```bash

@@ -186,7 +186,9 @@
         "dropped": { "type": "integer" },
         "signal": { "$ref": "#/$defs/nullable_str" },
         "stderr_tail": { "type": "string" },
-        "command": { "type": "array" }
+        "command": { "type": "array" },
+        "received_signals": { "type": "array", "items": { "type": "string" }, "description": "jgm run: signals the wrapper received." },
+        "forwarded_signals": { "type": "array", "items": { "type": "string" }, "description": "jgm run: signals relayed to the command (not under Slurm by default)." }
       }
     },
     "resource_sample": {
@@ -234,7 +236,7 @@
         "state": { "type": "string", "description": "Normalised: PENDING, RUNNING, COMPLETING, SUSPENDED, COMPLETED, FAILED, CANCELLED, TIMEOUT, OUT_OF_MEMORY, NODE_FAIL, PREEMPTED, REQUEUED, UNKNOWN_ENDED, ..." },
         "terminal": { "type": "boolean" },
         "active": { "type": "boolean" },
-        "change": { "type": "string", "enum": ["first_seen", "state", "detail", "refresh", "ended"] },
+        "change": { "type": "string", "enum": ["first_seen", "state", "detail", "refresh", "ended", "verdict"], "description": "verdict: the real terminal state of a job first reported as UNKNOWN_ENDED." },
         "job_name": { "$ref": "#/$defs/nullable_str" },
         "user": { "$ref": "#/$defs/nullable_str" },
         "account": { "$ref": "#/$defs/nullable_str" },
@@ -274,14 +276,15 @@
     "log_chunk": {
       "type": "object",
       "required": ["stream", "path", "offset", "text"],
-      "description": "A slice of the job's stdout/stderr file, read by the login-node probe. Concatenate chunks of one stream in offset order.",
+      "description": "A slice of the job's stdout/stderr, read by the login-node probe or teed by jgm run. Concatenate chunks of one stream in offset order.",
       "properties": {
         "stream": { "type": "string", "enum": ["stdout", "stderr"] },
         "path": { "type": "string" },
-        "offset": { "type": "integer", "minimum": 0, "description": "Byte offset of this chunk in the file." },
-        "text": { "type": "string" },
-        "size": { "type": "integer", "description": "File size when the chunk was read." },
-        "truncated": { "type": "boolean", "description": "True on the last chunk when the per-file cap was reached; nothing more is sent." },
+        "offset": { "type": "integer", "minimum": 0, "description": "Byte offset of this chunk in the raw stream." },
+        "text": { "type": "string", "description": "Carriage-return redraws folded to the last state of each line; a line still being drawn keeps its trailing \\r." },
+        "size": { "type": "integer", "description": "Raw stream size when the chunk was read." },
+        "truncated": { "type": "boolean", "description": "The per-stream budget was spent: only the end of the stream is sent, once the job is over." },
+        "skipped": { "type": "integer", "minimum": 0, "description": "Bytes of the stream jumped over before this chunk." },
         "eof": { "type": "boolean", "description": "True when the job has ended and this chunk reaches the end of the file." }
       }
     },

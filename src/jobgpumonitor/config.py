@@ -55,8 +55,12 @@ class Config:
     sample_s: float = 10.0
     sample_slow_s: float = 60.0
     sample_slow_after_s: float = 3600.0
-    #: Minimum interval between two ``progress.update`` events for the same bar.
+    #: Minimum interval between two ``progress.update`` events for the same bar, during the
+    #: first ``progress_slow_after_s`` of the run; ``progress_slow_s`` afterwards (heartbeats
+    #: carry the latest state of every bar anyway). A new bar and a finished bar always emit.
     progress_s: float = 1.0
+    progress_slow_s: float = 15.0
+    progress_slow_after_s: float = 60.0
     #: ``rank0``: only global rank 0 emits everything, other ranks emit start/heartbeat/exception/end.
     #: ``all``: every rank emits everything. ``off``: ranks other than 0 emit nothing.
     rank_mode: str = "rank0"
@@ -115,6 +119,7 @@ class Config:
         cfg.sample_s = max(1.0, cfg.sample_s)
         cfg.sample_slow_s = max(cfg.sample_s, cfg.sample_slow_s)
         cfg.progress_s = max(0.1, cfg.progress_s)
+        cfg.progress_slow_s = max(cfg.progress_s, cfg.progress_slow_s)
         if cfg.rank_mode not in ("rank0", "all", "off"):
             cfg.rank_mode = "rank0"
         return cfg
